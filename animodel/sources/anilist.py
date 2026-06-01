@@ -12,6 +12,7 @@ Každý tag má rank 0–100 (jak dominantní je v daném titulu).
 """
 
 import json
+import math
 import time
 import logging
 from pathlib import Path
@@ -405,3 +406,152 @@ class AniListClient:
             if len(media) < 50:
                 break
         return out
+
+    # ── User-based CF ───────────────────────────────────────────────────────
+
+    # Uživatelé, kteří dokončili dané AniList media a seřazení dle skóre.
+    QUERY_USERS_BY_MEDIA = """
+    query ($mediaId: Int, $page: Int) {
+      Page(page: $page, perPage: 50) {
+        mediaList(mediaId: $mediaId, status: COMPLETED, sort: SCORE_DESC) {
+          score
+          user { id }
+        }
+      }
+    }"""
+
+    # Dokončené anime daného uživatele, seřazené dle skóre sestupně.
+    QUERY_USER_ANIMELIST = """
+    query ($userId: Int) {
+      MediaListCollection(userId: $userId, type: ANIME, status: COMPLETED,
+                          sort: SCORE_DESC) {
+        lists {
+          entries {
+            score
+            media { idMal }
+          }
+        }
+      }
+    }"""
+
+    def similar_users_recommendations(
+        self,
+        liked_mal_ids: list[int],
+        min_overlap: int = 15,
+        top_users: int = 50,
+    ) -> list[dict]:
+        """
+        User-based CF: najde AniList uživatele s podobným vkusem a vrátí
+        jejich oblíbené anime jako kandidáty pro doporučení.
+
+        Postup:
+          1) Přeloží MAL ID -> AniList interní ID z existující enrich cache.
+          2) Pro každý seed (max 20) stáhne top 50 uživatelů, kteří ho
+             dokončili (sort SCORE_DESC, filtruji nulová hodnocení).
+          3) Spočítá překryv: kolik seedů sdílí každý uživatel. Uživatelé
+             s překryvem >= min_overlap jsou „podobní".
+          4) Pro každého podobného uživatele stáhne jeho dokončený seznam.
+          5) Vrátí agregovaná doporučení: score = avg_norm × log(count),
+             kde avg_norm je průměrné normalizované hodnocení uživateli
+             a count počet unikátních doporučitelů.
+
+        Poznámka ke skóre: AniList ukládá skóre ve formátu uživatele
+        (POINT_10, POINT_100, POINT_5, POINT_3). Normalizujeme heuristicky:
+        hodnota <= 10 -> /10, jinak -> /100. Jde o signál, ne přesné číslo.
+
+        Vrátí list[dict] s klíči 'mal_id' a 'score'.
+        Best-effort -- při API chybách vrátí co stihlo.
+        """
+        from collections import defaultdict, Counter
+
+        # 1. Přeložit MAL ID -> AniList interní ID (z existující enrich cache)
+        mal_to_anilist: dict[int, int] = {}
+        for mal_id in liked_mal_ids:
+            cached = self._load_cache(mal_id)
+            if cached and isinstance(cached, dict) and cached.get("id"):
+                mal_to_anilist[mal_id] = cached["id"]
+
+        if not mal_to_anilist:
+            log.warning("user-CF: žádné AniList ID v cache – enrich musí proběhnout dřív")
+            return []
+
+        # 2. Pro každý seed (max 20 API volání) stáhni top uživatele
+        user_overlap: Counter = Counter()
+        seeds = list(mal_to_anilist.items())[:20]
+        n = len(seeds)
+
+        for i, (mal_id, anilist_id) in enumerate(seeds):
+            print(f"  user-CF: hledám podobné uživatele [{i+1}/{n}] ...", end="\r")
+            result = self._post(
+                self.QUERY_USERS_BY_MEDIA,
+                {"mediaId": anilist_id, "page": 1},
+            )
+            if not result:
+                continue
+            entries = (
+                result.get("data", {}).get("Page", {}) or {}
+            ).get("mediaList", [])
+            for entry in entries:
+                if not (entry.get("score") or 0):
+                    continue          # přeskoč neohodnocené záznamy
+                uid = (entry.get("user") or {}).get("id")
+                if uid:
+                    user_overlap[uid] += 1
+
+        print(f"  user-CF: hledám podobné uživatele [{n}/{n}] ... hotovo      ")
+
+        if not user_overlap:
+            log.info("user-CF: žádní uživatelé nenalezeni")
+            return []
+
+        # 3. Filtruj uživatele s dostatečným překryvem
+        similar_users = [
+            uid for uid, count in user_overlap.most_common(top_users * 4)
+            if count >= min_overlap
+        ][:top_users]
+
+        if not similar_users:
+            best = user_overlap.most_common(1)[0][1]
+            print(
+                f"  user-CF: žádný uživatel nesplňuje min_overlap={min_overlap} "
+                f"(max dosažený překryv: {best})"
+            )
+            log.info(f"user-CF: max překryv byl pouze {best}")
+            return []
+
+        print(f"  user-CF: {len(similar_users)} podobných uživatelů, stahuji jejich seznamy ...")
+
+        # 4. Stáhni anime listy podobných uživatelů
+        liked_set = set(liked_mal_ids)
+        anime_scores: defaultdict[int, list[float]] = defaultdict(list)
+
+        for uid in similar_users:
+            result = self._post(self.QUERY_USER_ANIMELIST, {"userId": uid})
+            if not result:
+                continue
+            collection = (
+                result.get("data", {}).get("MediaListCollection") or {}
+            )
+            for lst in collection.get("lists", []):
+                for entry in lst.get("entries", []):
+                    raw_score = entry.get("score") or 0
+                    if not raw_score:
+                        continue
+                    media = entry.get("media") or {}
+                    mid = media.get("idMal")
+                    if not mid or mid in liked_set:
+                        continue
+                    # Heuristická normalizace: POINT_10 -> /10, POINT_100 -> /100
+                    norm = raw_score / 10.0 if raw_score <= 10 else raw_score / 100.0
+                    anime_scores[mid].append(norm)
+
+        # 5. Agreguj: průměrné norm. skóre × log(počet doporučitelů)
+        out = []
+        for mal_id, scores in anime_scores.items():
+            avg = sum(scores) / len(scores)
+            weighted = avg * math.log1p(len(scores))
+            out.append({"mal_id": mal_id, "score": weighted})
+
+        out.sort(key=lambda x: -x["score"])
+        log.info(f"user-CF: {len(out)} kandidátů z {len(similar_users)} uživatelů")
+        return out[:300]

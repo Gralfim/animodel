@@ -142,16 +142,21 @@ class Recommender:
         """Jednoduché user-based CF přes AniList (pokud klient umí). Best-effort."""
         finder = getattr(self.enr.anilist, "similar_users_recommendations", None)
         if not callable(finder):
+            # Metoda chybí – AniList klient ji nepodporuje
+            print("  user-CF: přeskočeno (AniList klient metodu nepodporuje)")
             return
+        liked = [t.mal_id for t in titles if t.user_score >= self.rc.high_score]
+        print(f"  user-CF: {len(liked)} seedů, min_overlap={self.rc.user_cf_min_overlap}, "
+              f"top_users={self.rc.user_cf_top_users}")
         try:
-            liked = [t.mal_id for t in titles if t.user_score >= self.rc.high_score]
             recs = finder(liked,
                           min_overlap=self.rc.user_cf_min_overlap,
                           top_users=self.rc.user_cf_top_users)
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
-        except Exception:
-            pass
+            print(f"  user-CF: {len(recs)} kandidátů přidáno")
+        except Exception as exc:
+            print(f"  user-CF: selhalo ({exc})")
 
     # ── Skórování ──────────────────────────────────────────────────────────────
 
