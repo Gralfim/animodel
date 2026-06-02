@@ -11,7 +11,9 @@ klidná paleta s jedním teplým akcentem, sloupce/bary kreslené čistě v CSS/
 from __future__ import annotations
 
 import html
+import re
 import datetime as _dt
+from collections import defaultdict
 
 ACCENT = "#e8a33d"
 ACCENT2 = "#6db0a6"
@@ -290,6 +292,46 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
 
 # ── RECOMMENDATIONS report ───────────────────────────────────────────────────
 
+def _anchor_id(name: str) -> str:
+    """Převede název klastru na validní HTML anchor ID."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "cluster"
+
+
+def _rec_card(r, rank: int) -> str:
+    """HTML karta jednoho doporučení. Sdílená mezi globálním i per-klastr pohledem."""
+    ten = (f' · <span class="ten">{_esc(r.title_en)}</span>'
+           if r.title_en and r.title_en != r.title else "")
+    flag = '<span class="flag">na tvém PTW</span>' if r.ptw else ""
+    why_parts = []
+    for lab, cat, val in r.why:
+        sign = "pos" if val >= 0 else "neg"
+        why_parts.append(f'<span class="{sign}">{_esc(lab)}</span>')
+    why = ", ".join(why_parts) if why_parts else "—"
+    seeds = ""
+    if r.cf_seeds:
+        seeds = ('<div class="note" style="margin-top:6px">protože máš rád: '
+                 + ", ".join(f'<i>{_esc(s)}</i>' for s in r.cf_seeds) + '</div>')
+    cl = f'<span class="tag">{_esc(r.cluster_name)}</span>' if r.cluster_name else ""
+    comm = f'{r.community:.2f}' if r.community is not None else '—'
+    syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
+    src = " · ".join(_esc(s) for s in r.sources)
+    return (
+        f'<div class="rec"><div class="rank">{rank:02d}</div>'
+        f'<div class="t">{_esc(r.title)}{flag}</div>'
+        f'<div style="margin:2px 0 4px">{ten}</div>'
+        f'<div class="scores">'
+        f'<div class="s"><div class="n pos">{r.pred:.1f}</div>'
+        f'<div class="k">tvůj odhad ({r.pred_lo:.1f}–{r.pred_hi:.1f})</div></div>'
+        f'<div class="s"><div class="n">{comm}</div><div class="k">MAL score</div></div>'
+        f'</div>'
+        f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
+        f'{seeds}'
+        + (f'<div class="syn">{syn}</div>' if syn else "")
+        + f'<div class="src" style="margin-top:10px">zdroj: {src}</div>'
+        f'</div>'
+    )
+
+
 def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None) -> str:
     u = _esc((userinfo or {}).get("user_name", "tebe"))
     parts = [_head("Doporučení — animodel")]
@@ -301,38 +343,150 @@ def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None
                  'jsou označené.</p>')
 
     for i, r in enumerate(recs, 1):
-        ten = f' · <span class="ten">{_esc(r.title_en)}</span>' if r.title_en and r.title_en != r.title else ""
-        flag = '<span class="flag">na tvém PTW</span>' if r.ptw else ""
-        why_parts = []
-        for lab, cat, val in r.why:
-            sign = "pos" if val >= 0 else "neg"
-            why_parts.append(f'<span class="{sign}">{_esc(lab)}</span>')
-        why = ", ".join(why_parts) if why_parts else "—"
-        seeds = ""
-        if r.cf_seeds:
-            seeds = ('<div class="note" style="margin-top:6px">protože máš rád: '
-                     + ", ".join(f'<i>{_esc(s)}</i>' for s in r.cf_seeds) + '</div>')
-        cl = f'<span class="tag">{_esc(r.cluster_name)}</span>' if r.cluster_name else ""
-        comm = f'{r.community:.2f}' if r.community is not None else '—'
-        syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
-        src = " · ".join(_esc(s) for s in r.sources)
-        parts.append(
-            f'<div class="rec"><div class="rank">{i:02d}</div>'
-            f'<div class="t">{_esc(r.title)}{flag}</div>'
-            f'<div style="margin:2px 0 4px">{ten}</div>'
-            f'<div class="scores">'
-            f'<div class="s"><div class="n pos">{r.pred:.1f}</div>'
-            f'<div class="k">tvůj odhad ({r.pred_lo:.1f}–{r.pred_hi:.1f})</div></div>'
-            f'<div class="s"><div class="n">{comm}</div><div class="k">MAL score</div></div>'
-            f'</div>'
-            f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
-            f'{seeds}'
-            + (f'<div class="syn">{syn}</div>' if syn else "")
-            + f'<div class="src" style="margin-top:10px">zdroj: {src}</div>'
-            f'</div>')
+        parts.append(_rec_card(r, i))
 
     parts.append(_foot())
     out = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out)
+    return out_path
+
+
+def render_cluster_recommendations_html(
+    recs: list, model, out_path: str, userinfo: dict = None,
+    top_per_cluster: int = 15,
+) -> str:
+    """
+    Per-klastrový (per-náladový) pohled na doporučení.
+
+    Tituly jsou seskupeny podle cluster_name. Pořadí v každé sekci je
+    zachováno z globálního composite skóre (tj. nejlepší titul v dané
+    náladě je na prvním místě). Klastry jsou řazeny podle průměrného
+    composite skóre svých doporučení — takže vepředu jsou nálady, kde
+    máš nejsilnější match.
+
+    Výsledný soubor je samostatné HTML; odkaz na globální přehled
+    (recommendations.html) je v perexu.
+    """
+    # ── Seskupení recs ───────────────────────────────────────────────────
+    cluster_groups: dict[str, list] = defaultdict(list)
+    no_cluster: list = []
+    for r in recs:   # recs jsou seřazeny globálním composite → pořadí v klastru zachováno
+        if r.cluster_name:
+            cluster_groups[r.cluster_name].append(r)
+        else:
+            no_cluster.append(r)
+
+    # Metadata klastrů z modelu (intensity, signature, size)
+    cluster_meta = {c.name: c for c in (model.clusters if model and hasattr(model, "clusters") else [])}
+
+    # Klastry seřadit: průměrné composite doporučení sestupně
+    def _avg_composite(name: str) -> float:
+        g = cluster_groups[name]
+        return sum(r.composite for r in g) / len(g) if g else 0.0
+
+    ordered = sorted(cluster_groups.keys(), key=lambda n: -_avg_composite(n))
+
+    # ── HTML ─────────────────────────────────────────────────────────────
+    parts = [_head("Doporučení podle nálady — animodel")]
+    parts.append('<p class="kicker">animodel · doporučení podle nálady</p>')
+    parts.append('<h1 id="top">Co sledovat<br><em>podle nálady</em></h1>')
+
+    n_cl = len(ordered)
+    parts.append(
+        f'<p class="lead">{len(recs)} doporučení v {n_cl} náladách. '
+        f'Pořadí v každé sekci odpovídá kompozitnímu skóre pro danou náladu. '
+        f'Globální přehled viz '
+        f'<a href="recommendations.html">recommendations.html</a>.</p>'
+    )
+
+    # Navigační panel — přehled nálad
+    parts.append('<div class="panel" style="padding:16px 22px;margin-bottom:32px">')
+    parts.append('<h3 style="margin:0 0 10px">Nálady</h3>')
+    parts.append('<div style="line-height:2.4">')
+    for name in ordered:
+        count = len(cluster_groups[name])
+        anchor = _anchor_id(name)
+        meta = cluster_meta.get(name)
+        if meta:
+            if meta.intensity > 0.25:
+                badge = f' <span class="pill heavy" style="font-size:10px">náročné</span>'
+            elif meta.intensity < -0.25:
+                badge = f' <span class="pill light" style="font-size:10px">lehké</span>'
+            else:
+                badge = f' <span class="pill mix" style="font-size:10px">smíšené</span>'
+        else:
+            badge = ""
+        parts.append(
+            f'<a href="#{anchor}" style="margin-right:22px;white-space:nowrap">'
+            f'<b>{_esc(name)}</b>{badge} '
+            f'<span style="color:{MUT};font-size:12px">({count})</span></a>'
+        )
+    if no_cluster:
+        parts.append(
+            f'<a href="#ostatni" style="margin-right:22px">'
+            f'ostatní <span style="color:{MUT};font-size:12px">({len(no_cluster)})</span></a>'
+        )
+    parts.append('</div></div>')
+
+    # ── Sekce pro každý klastr ────────────────────────────────────────────
+    for name in ordered:
+        group = cluster_groups[name]
+        anchor = _anchor_id(name)
+        meta = cluster_meta.get(name)
+
+        # Hlavička klastru
+        if meta:
+            if meta.intensity > 0.25:
+                pill = f'<span class="pill heavy">náročné · {meta.intensity:+.2f}</span>'
+            elif meta.intensity < -0.25:
+                pill = f'<span class="pill light">lehké · {meta.intensity:+.2f}</span>'
+            else:
+                pill = f'<span class="pill mix">smíšené · {meta.intensity:+.2f}</span>'
+            sig = "".join(
+                f'<span class="tag cat-{_esc(cat)}">{_esc(lab)}</span>'
+                for lab, cat, _ in meta.signature[:6]
+            )
+            meta_html = (
+                f'<div class="meta">'
+                f'{meta.size} titulů v modelu · průměr {meta.mean_user_score:.1f}'
+                f' &nbsp; {pill}</div>'
+                f'<div style="margin:6px 0 4px">{sig}</div>'
+            )
+        else:
+            meta_html = ""
+
+        parts.append(f'<h2 id="{anchor}" style="margin-top:72px">{_esc(name)}</h2>')
+        group_display = group[:top_per_cluster]
+        total_in_cluster = len(group)
+        parts.append(
+            f'<div class="cl" style="margin-bottom:16px">'
+            f'{meta_html}'
+            f'<div class="note">zobrazeno {len(group_display)} z {total_in_cluster} kandidátů v této náladě</div>'
+            f'</div>'
+        )
+
+        for i, r in enumerate(group_display, 1):
+            parts.append(_rec_card(r, i))
+
+        parts.append(
+            f'<p style="text-align:right;margin-top:2px;margin-bottom:0">'
+            f'<a href="#top" style="font-size:12px;color:{MUT}">↑ zpět nahoru</a></p>'
+        )
+
+    # ── Tituly bez klastru ────────────────────────────────────────────────
+    if no_cluster:
+        parts.append('<h2 id="ostatni" style="margin-top:72px">Ostatní</h2>')
+        parts.append('<p class="note">Tituly bez přiřazené nálady.</p>')
+        for i, r in enumerate(no_cluster, 1):
+            parts.append(_rec_card(r, i))
+        parts.append(
+            f'<p style="text-align:right;margin-top:2px">'
+            f'<a href="#top" style="font-size:12px;color:{MUT}">↑ zpět nahoru</a></p>'
+        )
+
+    parts.append(_foot())
+    out_html = "\n".join(parts)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(out_html)
     return out_path

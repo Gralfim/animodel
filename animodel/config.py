@@ -37,7 +37,8 @@ class RecommendCfg:
     w_cf: float = 1.0                 # collaborative signál (rec. graf / podobní uživatelé)
     w_quality: float = 0.3            # mírná preference vyššího komunitního skóre
     min_community: float = 6.5        # nedoporučuj pod tímto komunitním skóre
-    top_n: int = 40                   # kolik doporučení vypsat
+    top_n: int = 40                   # kolik doporučení ve globálním přehledu
+    top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu
     use_user_cf: bool = False         # zapnout user-based CF přes AniList (drahé, pomalé)
     user_cf_min_overlap: int = 15
     user_cf_top_users: int = 50

@@ -184,7 +184,15 @@ class Recommender:
         return best_sim * (best_score - self.model.u_mean + 1.0), best_name
 
     def recommend(self, all_titles: list[Title], ptw_ids: set[int],
-                  watched_ids: set[int], show_progress=True) -> list[Recommendation]:
+                  watched_ids: set[int], show_progress=True,
+                  limit: int | None = -1) -> list[Recommendation]:
+        """
+        Vrátí seřazený list Recommendation.
+
+        limit=-1  → ořízni na self.rc.top_n (výchozí chování, globální přehled)
+        limit=None → vrať celý ohodnocený pool (pro per-klastr pohled)
+        limit=N   → vrať prvních N
+        """
         # 1) kandidáti (vše co jsem viděl je "seen"; PTW NEvylučujeme)
         cand_meta = self._gather_candidates(all_titles, seen_ids=watched_ids)
         if not cand_meta:
@@ -231,4 +239,5 @@ class Recommender:
             ))
 
         recs.sort(key=lambda r: -r.composite)
-        return recs[: self.rc.top_n]
+        top = self.rc.top_n if limit == -1 else limit
+        return recs if top is None else recs[:top]

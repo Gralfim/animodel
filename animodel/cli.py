@@ -95,13 +95,23 @@ def run(args) -> int:
                    if e.status in ("Completed", "Watching", "On-Hold", "Dropped")}
     ptw_ids = {e.mal_id for e in by_status.get("Plan to Watch", [])}
     rec = Recommender(model, enr, cfg)
-    recs = rec.recommend(titles, ptw_ids=ptw_ids, watched_ids=watched_ids, show_progress=True)
-    print(f"      {len(recs)} doporučení")
+    # Stáhneme celý ohodnocený pool (bez ořezu) — globální view ho ořízne na top_n,
+    # per-klastr view pak pro každou náladu ukáže vlastních top_per_cluster.
+    recs_all = rec.recommend(titles, ptw_ids=ptw_ids, watched_ids=watched_ids,
+                             show_progress=True, limit=None)
+    recs = recs_all[: cfg.recommend.top_n]
+    print(f"      {len(recs_all)} kandidátů celkem, top {len(recs)} do globálního přehledu")
 
     print(f"[5/5] Generuji HTML …")
     rec_html = os.path.join(cfg.out_dir, "recommendations.html")
     report.render_recommendations_html(recs, rec_html, userinfo)
     print(f"      → {rec_html}")
+    mood_html = os.path.join(cfg.out_dir, "recommendations_by_mood.html")
+    report.render_cluster_recommendations_html(
+        recs_all, model, mood_html, userinfo,
+        top_per_cluster=cfg.recommend.top_per_cluster,
+    )
+    print(f"      → {mood_html}")
     print("[hotovo]")
     return 0
 
