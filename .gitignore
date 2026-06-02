@@ -15,6 +15,7 @@ cache
 output
 output_backup
 animelist.xml
+config.yaml
 
 # IDE
 .vscodesettings.json
