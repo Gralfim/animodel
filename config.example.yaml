@@ -28,3 +28,7 @@ recommend:
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
   top_n: 40
   use_user_cf: false        # user-based CF přes AniList (pomalé)
+  user_cf_min_overlap: 4    # min. počet sdílených nišových seedů s uživatelem
+  user_cf_top_users: 120    # kolik nejpodobnějších uživatelů použít
+  user_cf_seed_count: 25    # kolik nejméně populárních titulů použít jako seed
+  user_cf_users_per_seed: 100  # kolik uživatelů stáhnout na jeden seed

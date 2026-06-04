@@ -40,8 +40,10 @@ class RecommendCfg:
     top_n: int = 40                   # kolik doporučení ve globálním přehledu
     top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu
     use_user_cf: bool = False         # zapnout user-based CF přes AniList (drahé, pomalé)
-    user_cf_min_overlap: int = 15
-    user_cf_top_users: int = 50
+    user_cf_min_overlap: int = 4      # min. počet sdílených (nišových) seedů s uživatelem
+    user_cf_top_users: int = 120      # kolik nejpodobnějších uživatelů použít
+    user_cf_seed_count: int = 25      # kolik nejméně populárních seedů použít
+    user_cf_users_per_seed: int = 100 # kolik uživatelů stáhnout na jeden seed
 
 
 @dataclass

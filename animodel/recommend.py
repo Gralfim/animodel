@@ -139,19 +139,28 @@ class Recommender:
         return cand
 
     def _user_cf(self, titles, seen_ids, bump):
-        """Jednoduché user-based CF přes AniList (pokud klient umí). Best-effort."""
+        """User-based CF přes AniList. Best-effort, vypnuté defaultně."""
         finder = getattr(self.enr.anilist, "similar_users_recommendations", None)
         if not callable(finder):
-            # Metoda chybí – AniList klient ji nepodporuje
             print("  user-CF: přeskočeno (AniList klient metodu nepodporuje)")
             return
-        liked = [t.mal_id for t in titles if t.user_score >= self.rc.high_score]
-        print(f"  user-CF: {len(liked)} seedů, min_overlap={self.rc.user_cf_min_overlap}, "
-              f"top_users={self.rc.user_cf_top_users}")
+        # Seedy = vše, co jsi viděl a ohodnotil; metoda si sama vybere ty
+        # nejnišovější. Předáme i tvá skóre kvůli kosinové podobnosti.
+        rated = [t for t in titles if t.user_score and t.user_score > 0]
+        liked = [t.mal_id for t in rated]
+        user_scores = {t.mal_id: t.user_score for t in rated}
+        print(f"  user-CF: {len(liked)} ohodnocených titulů na vstupu, "
+              f"min_overlap={self.rc.user_cf_min_overlap}, "
+              f"seed_count={self.rc.user_cf_seed_count}")
         try:
-            recs = finder(liked,
-                          min_overlap=self.rc.user_cf_min_overlap,
-                          top_users=self.rc.user_cf_top_users)
+            recs = finder(
+                liked,
+                min_overlap=self.rc.user_cf_min_overlap,
+                top_users=self.rc.user_cf_top_users,
+                seed_count=self.rc.user_cf_seed_count,
+                users_per_seed=self.rc.user_cf_users_per_seed,
+                user_scores=user_scores,
+            )
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
             print(f"  user-CF: {len(recs)} kandidátů přidáno")
