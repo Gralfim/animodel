@@ -133,6 +133,7 @@ class Recommender:
                     pass
 
         # B) user-based CF (volitelné)
+        self._cf_raw_results = []  # reset před každým spuštěním
         if self.rc.use_user_cf and self.enr.anilist:
             self._user_cf(titles, seen_ids, bump)
 
@@ -161,6 +162,7 @@ class Recommender:
                 users_per_seed=self.rc.user_cf_users_per_seed,
                 user_scores=user_scores,
             )
+            self._cf_raw_results = recs  # uloženo pro CF HTML report
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
             print(f"  user-CF: {len(recs)} kandidátů přidáno")

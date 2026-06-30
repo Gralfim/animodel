@@ -21,9 +21,15 @@ import requests
 
 log = logging.getLogger(__name__)
 
-GRAPHQL_URL   = "https://graphql.anilist.co"
-REQUEST_DELAY = 0.7          # sekundy mezi requesty (konzervativní)
-RETRY_DELAYS  = [5, 15, 60]  # backoff při 429
+GRAPHQL_URL        = "https://graphql.anilist.co"
+REQUEST_DELAY_BASE = 0.7    # výchozí sekundy mezi requesty
+REQUEST_DELAY_MAX  = 4.0    # strop pro adaptivní zpomalení po sérii 429
+RETRY_DELAYS       = [5, 15, 40, 90]  # backoff při 429 — minimální čekání,
+                                       # NIKDY nepřepsáno hlavičkou Retry-After
+                                       # směrem dolů (AniList umí poslat i 0)
+MAX_WATCHER_PAGE    = 5000 // 50      # AniList limit: page*perPage ≤ 5000
+NO_PROGRESS_PAGE_LIMIT = 5            # kolik stránek bez nového uživatele
+                                       # ještě zkusit než to vzdát
 
 # GraphQL dotaz — stáhne tagy, studia a základní metadata přes MAL ID
 QUERY_BY_MAL_ID = """
@@ -88,7 +94,11 @@ class AniListClient:
     def __init__(self, cache_dir: str = "cache"):
         self.cache_path = Path(cache_dir) / "anilist"
         self.cache_path.mkdir(parents=True, exist_ok=True)
-        self._last_request = 0.0
+        self._last_request   = 0.0
+        # Adaptivní base rate: roste po sérii 429, postupně klesá zpět
+        # k REQUEST_DELAY_BASE po sérii úspěšných requestů.
+        self._current_delay  = REQUEST_DELAY_BASE
+        self._consecutive_429 = 0
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/json",
@@ -97,6 +107,23 @@ class AniListClient:
         })
 
     # ── Cache helpers ──────────────────────────────────────────────────────────
+
+    @property
+    def _cf_cache_path(self) -> Path:
+        p = self.cache_path.parent / "cf_al"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _cf_load(self, key: str):
+        """CF cache čtení — None pokud soubor neexistuje."""
+        f = self._cf_cache_path / f"{key}.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+    def _cf_save(self, key: str, data) -> None:
+        """CF cache zápis."""
+        f = self._cf_cache_path / f"{key}.json"
+        f.write_text(json.dumps(data, ensure_ascii=False, separators=(",",":")),
+                     encoding="utf-8")
 
     def _cache_file(self, mal_id: int) -> Path:
         return self.cache_path / f"mal_{mal_id}.json"
@@ -116,8 +143,8 @@ class AniListClient:
     def _post(self, query: str, variables: dict) -> dict | None:
         """Provede GraphQL POST request s rate limitingem a retry logikou."""
         elapsed = time.time() - self._last_request
-        if elapsed < REQUEST_DELAY:
-            time.sleep(REQUEST_DELAY - elapsed)
+        if elapsed < self._current_delay:
+            time.sleep(self._current_delay - elapsed)
 
         payload = {"query": query, "variables": variables}
 
@@ -127,34 +154,89 @@ class AniListClient:
                 self._last_request = time.time()
 
                 if resp.status_code == 429:
-                    # AniList vrátí Retry-After header
-                    wait = int(resp.headers.get("Retry-After", delay or 60))
-                    log.warning(f"Rate limit 429, čekám {wait}s…")
+                    # AniList Retry-After hlavička bývá nespolehlivá — umí
+                    # poslat i "0", což by bez floor hodnoty vedlo k
+                    # okamžitému dalšímu pokusu a vyčerpání všech retry
+                    # v ulomku sekundy bez skutečného čekání.
+                    # floor = naplánovaný backoff (RETRY_DELAYS), hlavička
+                    # ho může jen PRODLOUŽIT, nikdy zkrátit.
+                    floor       = delay or RETRY_DELAYS[-1]
+                    header_wait = int(resp.headers.get("Retry-After", 0) or 0)
+                    wait        = max(floor, header_wait)
+                    log.warning(
+                        f"Rate limit 429 (pokus {attempt+1}/{len(RETRY_DELAYS)+1}), "
+                        f"čekám {wait}s (floor={floor}s, header={header_wait}s)…"
+                    )
                     time.sleep(wait)
+
+                    # Adaptivní zpomalení base rate — po sérii 429 zvyš
+                    # interval mezi VŠEMI dalšími requesty, ne jen retry
+                    # tohoto jednoho. Postupně klesá zpět po úspěších.
+                    self._consecutive_429 += 1
+                    self._current_delay = min(
+                        REQUEST_DELAY_MAX,
+                        REQUEST_DELAY_BASE * (1.5 ** self._consecutive_429)
+                    )
                     continue
 
-                if resp.status_code == 404:
-                    return None
+                # Pozn.: HTTP 404 NENÍ speciální případ "titul neexistuje".
+                # AniList GraphQL endpoint pro Media(idMal:) vrací při
+                # neexistujícím ID normální HTTP 200 s data.Media=null.
+                # Skutečný HTTP 404/400/500 zde znamená problém s requestem
+                # samotným (špatná URL, server down, malformed query) —
+                # tedy stejně jako ostatní chyby NESMÍ vést k trvalému
+                # zacachování "nenalezeno". Necháváme to padat do
+                # raise_for_status() níže, kde se to zaloguje a vrátí None
+                # bez zápisu do cache (o to se starají volající metody).
+
+                if not resp.ok:
+                    body_excerpt = resp.text[:300].replace(chr(10), " ")
+                    log.warning(
+                        f"AniList HTTP {resp.status_code} (pokus {attempt+1}): "
+                        f"{body_excerpt!r}"
+                    )
 
                 resp.raise_for_status()
                 data = resp.json()
 
+                # Úspěšný request — postupně dekrementuj adaptivní zpomalení
+                # zpět k base rate (rychlejší než lineární decay by rušil
+                # ochranu příliš brzy po sérii 429).
+                if self._consecutive_429 > 0:
+                    self._consecutive_429 = max(0, self._consecutive_429 - 1)
+                    self._current_delay = max(
+                        REQUEST_DELAY_BASE,
+                        REQUEST_DELAY_BASE * (1.5 ** self._consecutive_429)
+                    )
+
                 # GraphQL vrátí errors pole i při HTTP 200
                 if "errors" in data:
-                    for err in data["errors"]:
-                        if err.get("status") == 404:
-                            return None
-                        log.warning(f"GraphQL error: {err.get('message')}")
+                    err_msgs = [e.get("message", "?") for e in data["errors"]]
+                    log.warning(f"GraphQL error(s): {'; '.join(err_msgs)}")
                     return None
 
                 return data
 
             except requests.RequestException as e:
+                # Zachyť detail HTTP odpovědi pokud je k dispozici (status + tělo)
+                # — pomáhá odlišit "náš dotaz je špatně" (400) od
+                # "AniList má výpadek" (500/502/503).
+                detail = ""
+                resp_obj = getattr(e, "response", None)
+                if resp_obj is not None:
+                    try:
+                        body = resp_obj.text[:300].replace(chr(10), " ")
+                        detail = f" | HTTP {resp_obj.status_code}: {body!r}"
+                    except Exception:
+                        pass
                 if attempt < len(RETRY_DELAYS) - 1:
-                    log.warning(f"Request chyba ({e}), retry za {delay}s…")
+                    log.warning(f"Request chyba ({e}){detail}, retry za {delay}s…")
                     time.sleep(delay)
                 else:
-                    log.error(f"AniList request selhal: {e}")
+                    log.error(
+                        f"AniList request selhal po {len(RETRY_DELAYS)+1} pokusech: "
+                        f"{e}{detail}"
+                    )
                     return None
 
         return None
@@ -166,22 +248,39 @@ class AniListClient:
         Vrátí AniList data pro anime dle MAL ID.
         Výsledek je cachován — opakované volání je okamžité.
 
-        Vrátí None pokud anime na AniList neexistuje.
-        Vrátí {} (prázdný dict) pokud byl uložen jako nenalezený.
+        Vrátí None pokud anime na AniList neexistuje NEBO pokud request
+        selhal (rozdíl viz níže).
+        Vrátí {} (prázdný dict) pokud byl uložen jako potvrzeně nenalezený.
+
+        Důležité: rozlišujeme dva různé důvody pro None:
+          1. _post() vrátí None kvůli SELHÁNÍ requestu (síť, 400, 500, timeout)
+             → NEUKLÁDÁME do cache, příští spuštění to zkusí znovu
+          2. Request uspěl, ale AniList potvrdil že Media neexistuje
+             (HTTP 200, data.Media = null) → bezpečně cachujeme {} sentinel
         """
         cached = self._load_cache(mal_id)
         if cached is not None:
             return cached if cached else None   # {} → None
 
         result = self._post(QUERY_BY_MAL_ID, {"idMal": mal_id})
-        if result and result.get("data", {}).get("Media"):
-            data = result["data"]["Media"]
-            self._save_cache(mal_id, data)
-            return data
+
+        if result is None:
+            # _post selhal (chyba/timeout/vyčerpané retries) — NEUKLÁDÁME.
+            log.warning(
+                f"AniList get_anime(MAL {mal_id}): request selhal, "
+                f"cache beze změny (zkusí se znovu příště)"
+            )
+            return None
+
+        media = result.get("data", {}).get("Media")
+        if media:
+            self._save_cache(mal_id, media)
+            return media
         else:
-            # Nenalezeno — ulož prázdný dict jako sentinel
+            # Request byl úspěšný (HTTP 200), AniList potvrdil že titul
+            # neexistuje — toto JE bezpečné cachovat natrvalo.
             self._save_cache(mal_id, {})
-            log.debug(f"AniList: MAL ID {mal_id} nenalezeno")
+            log.debug(f"AniList: MAL ID {mal_id} potvrzeně nenalezeno")
             return None
 
     def get_anime_batch(
@@ -229,13 +328,27 @@ class AniListClient:
                 )
 
             result = self._post(QUERY_BATCH, {"ids": batch})
-            if not result:
-                # Fallback: stáhni jeden po jednom
-                log.warning("Batch query selhala, přepínám na jednotlivé requesty…")
+            if result is None:
+                # Batch request selhal (ne "nic se nenašlo") — fallback na
+                # jednotlivé requesty. get_anime() teď sám správně rozlišuje
+                # selhání od potvrzeného nenalezení, takže ani tady se
+                # neukládá falešný sentinel.
+                log.warning(
+                    f"AniList batch query selhala ({len(batch)} ID), "
+                    f"přepínám na jednotlivé requesty…"
+                )
+                batch_failed = 0
                 for mal_id in batch:
                     data = self.get_anime(mal_id)
                     if data:
                         results[mal_id] = data
+                    elif self._load_cache(mal_id) is None:
+                        batch_failed += 1  # stále nestažené (request selhal)
+                if batch_failed:
+                    log.warning(
+                        f"  {batch_failed}/{len(batch)} titulů se nepodařilo "
+                        f"stáhnout ani jednotlivě — zkusí se příště znovu"
+                    )
                 continue
 
             media_list = result.get("data", {}).get("Page", {}).get("media", [])
@@ -425,7 +538,7 @@ class AniListClient:
         pageInfo { hasNextPage }
         mediaList(mediaId: $mediaId, sort: SCORE_DESC) {
           score
-          user { id }
+          user { id name }
         }
       }
     }"""
@@ -439,8 +552,23 @@ class AniListClient:
           entries {
             status
             score
-            media { idMal popularity }
+            media { idMal popularity averageScore title { romaji } }
           }
+        }
+        user {
+          mediaListOptions {
+            scoreFormat
+          }
+        }
+      }
+    }"""
+
+    QUERY_USER_NAMES = """
+    query ($ids: [Int]) {
+      Page(perPage: 50) {
+        users(id_in: $ids) {
+          id
+          name
         }
       }
     }"""
@@ -524,9 +652,14 @@ class AniListClient:
 
         # 2. Vyber NEJMÉNĚ POPULÁRNÍ seedy (vzácnost = silnější signál).
         #    Popularitu bereme z cache (uložená při enrichi), fallback dotazem.
-        pop_by_mal: dict[int, int] = {}
+        pop_by_mal:      dict[int, int]   = {}
+        seed_comm_norm:  dict[int, float]  = {}  # mal_id → AniList averageScore/100
         for mal_id, aid in mal_to_anilist.items():
             pop_by_mal[mal_id] = self._media_popularity(aid, mal_id) or 10**9
+            # Komunitní průměr pro seed titul — z hlavní AniList cache
+            _cached = self._load_cache(mal_id)
+            _avg    = (_cached.get("averageScore") or 0) if _cached else 0
+            seed_comm_norm[mal_id] = _avg / 100.0 if _avg else 0.75
 
         # seřaď vzestupně dle popularity -> nejnišovější první
         ranked = sorted(mal_to_anilist.items(), key=lambda kv: pop_by_mal[kv[0]])
@@ -545,64 +678,190 @@ class AniListClient:
 
         # 3. Pro každý seed stáhni uživatele (stránkovaně) i s jejich ratingem.
         #    user_profile[uid] = {seed_mal_id: norm_score}
+        #    user_names[uid]   = username (pro výstup)
         user_profile: defaultdict[int, dict[int, float]] = defaultdict(dict)
         user_weight: defaultdict[int, float] = defaultdict(float)
+        user_names: dict[int, str] = {}
 
         for i, (mal_id, anilist_id) in enumerate(seeds):
-            print(f"  user-CF: sbírám uživatele [{i+1}/{n}] (pop≈{pop_by_mal[mal_id]}) ...",
-                  end="\r")
-            collected = 0
-            page = 1
-            per_page = 50
-            while collected < users_per_seed:
-                result = self._post(
-                    self.QUERY_USERS_BY_MEDIA,
-                    {"mediaId": anilist_id, "page": page, "perPage": per_page},
-                )
-                if not result:
-                    break
-                pg = (result.get("data") or {}).get("Page") or {}
-                entries = pg.get("mediaList") or []
-                if not entries:
-                    break
-                for entry in entries:
-                    raw = entry.get("score") or 0
-                    if not raw:
-                        continue
-                    uid = (entry.get("user") or {}).get("id")
-                    if not uid:
-                        continue
+            ck = f"watchers_{anilist_id}"
+            cached_w = self._cf_load(ck)
+            if cached_w is not None:
+                # Cache hit: použij uložené watchers
+                print(f"  user-CF: seed [{i+1}/{n}] z cache ({len(cached_w)} uživatelů)",
+                      end="\r")
+                for uid, uname, raw in cached_w[:users_per_seed]:
                     user_profile[uid][mal_id] = self._norm_score(raw)
                     user_weight[uid] += seed_weight.get(mal_id, 1.0)
-                    collected += 1
-                if not (pg.get("pageInfo") or {}).get("hasNextPage"):
-                    break
-                page += 1
+                    user_names[uid]   = uname
+            else:
+                # Cache miss: stáhni a ulož
+                print(f"  user-CF: sbírám uživatele [{i+1}/{n}] (pop≈{pop_by_mal[mal_id]}) ...",
+                      end="\r")
+                collected     = 0
+                page          = 1
+                per_page      = 50
+                fetched_w: list = []
+                fetch_failed  = False  # True = request selhal, ne legitimní konec
+                hit_page_cap  = False  # True = narazili jsme na MAX_WATCHER_PAGE
+                no_progress_streak = 0  # počet stránek po sobě bez nového uživatele
 
-        print(f"  user-CF: sbírám uživatele [{n}/{n}] ... hotovo                       ")
+                while collected < users_per_seed:
+                    # Strop na page — AniList odmítne page*perPage > 5000
+                    # bez ohledu na to, kolik dat skutečně existuje.
+                    # Nejčastější příčina: sort=SCORE_DESC řadí nehodnocené
+                    # záznamy (score=0) na konec; pokud titul má málo
+                    # skutečně hodnotících diváků, smyčka by jinak stránkovala
+                    # donekonečna a hledala hodnocení, která už nepřijdou.
+                    if page > MAX_WATCHER_PAGE:
+                        hit_page_cap = True
+                        break
+
+                    result = self._post(
+                        self.QUERY_USERS_BY_MEDIA,
+                        {"mediaId": anilist_id, "page": page, "perPage": per_page},
+                    )
+                    if result is None:
+                        # _post selhal (síť/400/500/timeout) — odliš od
+                        # legitimního konce výsledků (prázdné entries níže).
+                        fetch_failed = True
+                        break
+                    pg      = (result.get("data") or {}).get("Page") or {}
+                    entries = pg.get("mediaList") or []
+                    if not entries:
+                        break  # legitimní konec — žádná další data
+
+                    collected_before = collected
+                    for entry in entries:
+                        raw      = entry.get("score") or 0
+                        if not raw:
+                            continue
+                        user_obj = entry.get("user") or {}
+                        uid      = user_obj.get("id")
+                        uname    = user_obj.get("name", "")
+                        if not uid:
+                            continue
+                        # Použij vždy — i částečné výsledky obohatí tento běh,
+                        # i když je nakonec neuložíme do cache (viz níže).
+                        user_profile[uid][mal_id] = self._norm_score(raw)
+                        user_weight[uid] += seed_weight.get(mal_id, 1.0)
+                        user_names[uid]   = uname
+                        fetched_w.append([uid, uname, raw])
+                        collected += 1
+
+                    # Sleduj stránky bez jakéhokoliv nového ohodnoceného
+                    # uživatele — pokud jich je moc po sobě, dál stránkovat
+                    # je marné (jsme už v dlouhém ocasu nehodnocených
+                    # záznamů) a jen to plýtvá requesty a riskuje page cap.
+                    if collected == collected_before:
+                        no_progress_streak += 1
+                        if no_progress_streak >= NO_PROGRESS_PAGE_LIMIT:
+                            break
+                    else:
+                        no_progress_streak = 0
+
+                    if not (pg.get("pageInfo") or {}).get("hasNextPage"):
+                        break
+                    page += 1
+
+                if hit_page_cap:
+                    log.warning(
+                        f"user-CF seed MAL {mal_id} (AL {anilist_id}): "
+                        f"narazil na MAX_WATCHER_PAGE={MAX_WATCHER_PAGE} "
+                        f"(AniList limit page×perPage≤5000) — "
+                        f"{len(fetched_w)} uživatelů použito, titul má "
+                        f"pravděpodobně mnoho nehodnocených záznamů"
+                    )
+
+                if fetch_failed:
+                    # NEUKLÁDÁME do cache — částečné výsledky jsme už použili
+                    # výše pro tento běh, ale příští spuštění má dostat šanci
+                    # stáhnout zbytek znovu, ne tvářit se že seed má jen
+                    # {len(fetched_w)} uživatelů natrvalo.
+                    log.warning(
+                        f"user-CF seed MAL {mal_id} (AL {anilist_id}): "
+                        f"request selhal po {len(fetched_w)} získaných "
+                        f"uživatelích (stránka {page}) — cache NEUKLÁDÁM"
+                    )
+                else:
+                    self._cf_save(ck, fetched_w)
+                    log.debug(
+                        f"user-CF seed MAL {mal_id}: {len(fetched_w)} "
+                        f"uživatelů staženo a cachováno"
+                    )
+
+        n_failed_seeds = sum(
+            1 for mal_id, aid in seeds
+            if self._cf_load(f"watchers_{aid}") is None
+        )
+        print(
+            f"  user-CF: sbírám uživatele [{n}/{n}] ... hotovo  "
+            f"({n_failed_seeds} seedů bez cache kvůli chybám, zkusí se příště)"
+            if n_failed_seeds else
+            f"  user-CF: sbírám uživatele [{n}/{n}] ... hotovo                       "
+        )
+
+        # Doplň chybějící jména batch dotazem (záchrana pro starou cache)
+        missing_ids = [uid for uid in user_profile if uid not in user_names]
+        if missing_ids:
+            batch_size = 50
+            for i in range(0, len(missing_ids), batch_size):
+                chunk  = missing_ids[i:i + batch_size]
+                result = self._post(self.QUERY_USER_NAMES, {"ids": chunk})
+                for u in ((result or {}).get("data", {}).get("Page", {})
+                          .get("users", [])):
+                    if u.get("id") and u.get("name"):
+                        user_names[u["id"]] = u["name"]
+            log.debug(f"user-CF: doplněno {len(missing_ids)} jmen")
 
         if not user_profile:
             log.info("user-CF: žádní uživatelé nenalezeni")
             return []
 
         # 4. Podobnost uživatele = kosinus ratingových vektorů na překryvu
-        #    (pokud máme user_scores), váženo `seed_weight`. Tvrdý práh na
-        #    počet sdílených seedů zůstává `min_overlap`.
         def cosine(uid: int) -> float:
+            """Vážená Pearsonova korelace na komunitně-relativních skóre.
+
+            diff_mine_j  = my_norm_j  - c_norm_j   (odchylka ode mě od komunity)
+            diff_their_j = their_norm_j - c_norm_j  (odchylka od nich od komunity)
+
+            Pearson automaticky centruje oba vektory kolem jejich průměru →
+            odstraní absolutní bias (kdo hodnotí výš/níž celkově) a zachová
+            TVAR preference. Nízká variance (plochý hodnotitel) → blízko 0.
+            """
             shared = user_profile[uid]
-            if user_scores:
-                num = den_u = den_o = 0.0
-                for mid, their in shared.items():
-                    mine = self._norm_score((user_scores.get(mid) or 0) * 10)
-                    w = seed_weight.get(mid, 1.0)
-                    num += w * mine * their
-                    den_u += w * mine * mine
-                    den_o += w * their * their
-                if den_u <= 0 or den_o <= 0:
-                    return 0.0
-                return num / math.sqrt(den_u * den_o)
-            # bez mých skóre: použij váženou velikost překryvu
-            return user_weight[uid]
+            if not user_scores:
+                return user_weight[uid]
+
+            my_diffs: list[float]    = []
+            their_diffs: list[float] = []
+            weights: list[float]     = []
+
+            for mid, their_norm in shared.items():
+                my_raw = user_scores.get(mid) or 0
+                if not my_raw:
+                    continue
+                my_norm = self._norm_score(my_raw * 10)
+                c       = seed_comm_norm.get(mid, 0.75)
+                my_diffs.append(my_norm  - c)
+                their_diffs.append(their_norm - c)
+                weights.append(seed_weight.get(mid, 1.0))
+
+            if len(my_diffs) < 2:
+                return 0.0
+
+            total_w  = sum(weights)
+            my_mean  = sum(w * d for w, d in zip(weights, my_diffs))   / total_w
+            th_mean  = sum(w * d for w, d in zip(weights, their_diffs)) / total_w
+            my_c     = [d - my_mean for d in my_diffs]
+            th_c     = [d - th_mean for d in their_diffs]
+            num      = sum(w * a * b for w, a, b in zip(weights, my_c, th_c))
+            den_m    = math.sqrt(sum(w * a * a for w, a in zip(weights, my_c)))
+            den_t    = math.sqrt(sum(w * b * b for w, b in zip(weights, th_c)))
+            if den_m < 1e-9 or den_t < 1e-9:
+                return 0.0
+            return num / (den_m * den_t)
+
 
         candidates = [
             (uid, cosine(uid))
@@ -619,63 +878,157 @@ class AniListClient:
 
         candidates.sort(key=lambda x: -x[1])
         similar_users = [uid for uid, _ in candidates[:top_users]]
-        sim_by_uid = dict(candidates[:top_users])
+        sim_by_uid    = dict(candidates[:top_users])
 
         print(f"  user-CF: {len(similar_users)} podobných uživatelů "
               f"(z {len(user_profile)} kandidátů), stahuji jejich seznamy ...")
 
-        # 5. Stáhni listy podobných uživatelů a agreguj kandidáty.
-        #    Příspěvek = similarita_uživatele × jeho_norm_rating, a navíc
-        #    vážíme vzácnost (méně populární doporučený titul = zajímavější).
+        # 5. Stáhni listy podobných uživatelů.
+        #    Diferenciální agregace:
+        #      diff_i = norm_score_i − community_norm_i
+        #      → kladné: uživatel hodnotí výš než průměr (dobrý signál)
+        #      → záporné: uživatel hodnotí níž (negativní signál, přispívá záporně)
+        #    Výsledek: weighted_diff = Σ(sim_i × diff_i) / Σ(sim_i)
+        #    CF skóre = community_norm + weighted_diff  (0–1 škála → *10 = 0–10)
         liked_set = set(liked_mal_ids)
-        agg_num: defaultdict[int, float] = defaultdict(float)   # Σ sim×rating
-        agg_sim: defaultdict[int, float] = defaultdict(float)   # Σ sim
-        rec_count: defaultdict[int, int] = defaultdict(int)
-        pop_seen: dict[int, int] = {}
+
+        # Σ sim×diff, Σ sim, počet hodnotitelů, community avg, top raters
+        agg_diff: defaultdict[int, float]   = defaultdict(float)  # Σ sim×diff
+        agg_sim:  defaultdict[int, float]   = defaultdict(float)  # Σ sim
+        title_store: dict[int, str]         = {}                   # mal_id → název
+        rec_count: defaultdict[int, int]    = defaultdict(int)
+        comm_norm: dict[int, float]         = {}                   # community 0–1
+        rater_list: defaultdict[int, list]  = defaultdict(list)   # [(sim, uname)]
+
+        _DIVISORS = {
+            "POINT_100":        100.0,
+            "POINT_10_DECIMAL": 10.0,
+            "POINT_10":         10.0,
+            "POINT_5":          5.0,
+            "POINT_3":          3.0,
+        }
 
         m = len(similar_users)
+        _ul_cache_hits   = 0
+        _ul_fetched      = 0
+        _ul_failed       = 0
         for j, uid in enumerate(similar_users):
-            print(f"  user-CF: stahuji seznamy [{j+1}/{m}] ...", end="\r")
-            result = self._post(self.QUERY_USER_ANIMELIST, {"userId": uid})
-            if not result:
-                continue
-            collection = (result.get("data") or {}).get("MediaListCollection") or {}
-            sim = max(0.0, sim_by_uid.get(uid, 0.0))
-            for lst in collection.get("lists", []):
-                for entry in lst.get("entries", []):
-                    status = entry.get("status")
-                    if status in ("PLANNING", "DROPPED"):
-                        continue
-                    raw = entry.get("score") or 0
-                    if not raw:
-                        continue
-                    media = entry.get("media") or {}
-                    mid = media.get("idMal")
-                    if not mid or mid in liked_set:
-                        continue
-                    norm = self._norm_score(raw)
-                    if norm < 0.6:           # ignoruj jimi spíš odmítnuté
-                        continue
-                    agg_num[mid] += sim * norm
-                    agg_sim[mid] += sim
-                    rec_count[mid] += 1
-                    if media.get("popularity"):
-                        pop_seen[mid] = int(media["popularity"])
+            sim  = max(0.0, sim_by_uid.get(uid, 0.0))
+            name = user_names.get(uid, str(uid))
+            ck   = f"userlist_{uid}"
+
+            cached_ul = self._cf_load(ck)
+            if cached_ul is not None:
+                # Cache hit — [fmt, [[mid, raw, avg_raw, title], ...]]
+                print(f"  user-CF: seznam [{j+1}/{m}] z cache", end="\r")
+                _fmt, raw_entries = cached_ul[0], cached_ul[1]
+                _ul_cache_hits += 1
+            else:
+                # Cache miss — stáhni a zpracuj
+                print(f"  user-CF: stahuji seznam [{j+1}/{m}] ...", end="\r")
+                result     = self._post(self.QUERY_USER_ANIMELIST, {"userId": uid})
+                if result is None:
+                    # _post selhal — NEUKLÁDÁME, tento uživatel se vynechá
+                    # v tomto běhu, ale příští spuštění to zkusí znovu
+                    # (cache zůstává prázdná = cache miss).
+                    _ul_failed += 1
+                    log.warning(
+                        f"user-CF userlist uid={uid} ({name}): request "
+                        f"selhal, cache nezměněna, uživatel vynechán"
+                    )
+                    continue
+                _ul_fetched += 1
+                collection = (result.get("data") or {}).get("MediaListCollection") or {}
+                _fmt       = (
+                    (collection.get("user") or {})
+                    .get("mediaListOptions", {})
+                    .get("scoreFormat", "UNKNOWN")
+                )
+                raw_entries: list = []
+                for _lst in collection.get("lists", []):
+                    for _e in _lst.get("entries", []):
+                        if _e.get("status") in ("PLANNING", "DROPPED"):
+                            continue
+                        _raw = _e.get("score") or 0
+                        if not _raw:
+                            continue
+                        _media   = _e.get("media") or {}
+                        _mid     = _media.get("idMal")
+                        _avg_raw = _media.get("averageScore") or 0
+                        _title   = (_media.get("title") or {}).get("romaji", "")
+                        if _mid and _avg_raw > 0:
+                            raw_entries.append([_mid, _raw, _avg_raw, _title])
+                self._cf_save(ck, [_fmt, raw_entries])
+
+            # Zpracuj záznamy (z cache nebo čerstvě stažené)
+            _div = _DIVISORS.get(_fmt)
+
+            # Osobní průměr — základ pro diferenciální skóre
+            _all_norms = [
+                max(0.0, min(1.0, raw / _div if _div else self._norm_score(raw)))
+                for _, raw, _, _ in raw_entries
+                if (raw / _div if _div else self._norm_score(raw)) > 0
+            ]
+            personal_avg = (sum(_all_norms) / len(_all_norms)) if _all_norms else 0.7
+
+            for mid, raw, avg_raw, title in raw_entries:
+                if mid in liked_set:
+                    continue
+                norm   = max(0.0, min(1.0,
+                    raw / _div if _div else self._norm_score(raw)
+                ))
+                c_norm = avg_raw / 100.0
+                diff   = norm - personal_avg
+                agg_diff[mid]  += sim * diff
+                agg_sim[mid]   += sim
+                rec_count[mid] += 1
+                if mid not in comm_norm and title:
+                    title_store[mid] = title
+                comm_norm[mid] = c_norm
+                rater_list[mid].append((sim, name))
 
         print(f"  user-CF: stahuji seznamy [{m}/{m}] ... hotovo            ")
+        log.info(
+            f"user-CF userlist: {_ul_cache_hits} z cache, "
+            f"{_ul_fetched} staženo, {_ul_failed} selhalo "
+            f"(z {m} podobných uživatelů)"
+        )
+        if _ul_failed:
+            print(
+                f"  user-CF: {_ul_failed} uživatelů selhalo (viz log) "
+                f"— zkusí se znovu při příštím spuštění"
+            )
 
-        # 6. Skóre kandidáta: vážený průměr ratingu (sim jako váha) × důvěra
-        #    v počet doporučitelů. Bez populárního zkreslení – netlačíme
-        #    blockbustery, ty stejně přijdou přes item-based větev.
+        # 6. Finální CF skóre a filtrování.
+        #    weighted_diff = Σ(sim×diff)/Σ(sim)  – vážený průměr diferenciálů
+        #    cf_score = community + weighted_diff  (0–1 → *10 na vstup do bump)
+        #    Práh: aspoň 2 nezávislí doporučitelé, kladné cf_score.
         out = []
-        for mid in agg_num:
-            if rec_count[mid] < 2:           # aspoň 2 nezávislí doporučitelé
+        for mid in agg_diff:
+            if rec_count[mid] < 2:
                 continue
-            weighted_rating = agg_num[mid] / agg_sim[mid] if agg_sim[mid] else 0.0
-            confidence = math.log1p(rec_count[mid])
-            score = weighted_rating * confidence
-            out.append({"mal_id": mid, "score": score, "n_users": rec_count[mid]})
+            c       = comm_norm.get(mid, 0.5)
+            w_diff  = agg_diff[mid] / agg_sim[mid] if agg_sim[mid] else 0.0
+            # Aditivní bonus za počet hodnotitelů (max ≈ +0.10 pro 10+ uživatelů).
+            # Záměrně malý a aditivní — nechceme násobit diff, jen jemně upřednostnit
+            # tituly doporučené více spřízněnými dušemi před těmi s jediným.
+            import math as _math
+            n_bonus = 0.03 * _math.log1p(max(0, rec_count[mid] - 2))
+            cf_raw  = max(0.0, c + w_diff + n_bonus)
+            # top raters (nejpodobnější, kteří tento titul hodnotili)
+            top_r   = sorted(rater_list[mid], key=lambda x: -x[0])[:5]
+            out.append({
+                "mal_id":       mid,
+                "score":        cf_raw * 10.0,   # pro bump() — může být > 10
+                "cf_score":     cf_raw * 10.0,
+                "community":    c * 10.0,
+                "diff":         w_diff * 10.0,
+                "n_users":      rec_count[mid],
+                "top_raters":   [(name, round(sim, 3)) for sim, name in top_r],
+                "title":        title_store.get(mid, ""),
+            })
 
-        out.sort(key=lambda x: -x["score"])
+        # Seřaď primárně dle cf_score
+        out.sort(key=lambda x: -x["cf_score"])
         log.info(f"user-CF: {len(out)} kandidátů z {len(similar_users)} uživatelů")
         return out[:300]

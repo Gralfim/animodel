@@ -490,3 +490,132 @@ def render_cluster_recommendations_html(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out_html)
     return out_path
+
+
+def _cf_rec_card(r_cf: dict, enr, rank: int) -> str:
+    """Karta CF doporučeni. Kombinuje enr (Recommendation) a r_cf (raw CF dict)."""
+    mid       = r_cf.get("mal_id")
+    cf_score  = r_cf.get("cf_score", 0.0)
+    community = r_cf.get("community", 0.0)
+    diff      = r_cf.get("diff", 0.0)
+    n_users   = r_cf.get("n_users", 0)
+    raters    = r_cf.get("top_raters", [])
+
+    # Tituly
+    title    = _esc((enr.title    if enr else None) or r_cf.get("title") or f"MAL #{mid}")
+    title_en = _esc((enr.title_en if enr else None) or r_cf.get("title_en", ""))
+    if title_en == title:
+        title_en = ""
+    ten  = f' \xb7 <span class="ten">{title_en}</span>' if title_en else ""
+    ptw  = enr.ptw if enr else False
+    flag = '<span class="flag">na tve\u0301m PTW</span>' if ptw else ""
+    mal_url = f"https://myanimelist.net/anime/{mid}" if mid else "#"
+
+    # Skore sekce
+    cf_color   = ACCENT  if cf_score >= 9.0  else (ACCENT2 if cf_score >= 7.5 else MUT)
+    diff_color = ACCENT  if diff >= 0         else NEG
+    comm_str   = f"{community:.2f}" if community else "\u2014"
+
+    scores_html = (
+        f'<div class="scores">'
+        f'<div class="s"><div class="n" style="color:{cf_color}">{cf_score:.2f}</div>'
+        f'<div class="k">CF sk\xf3re</div></div>'
+        f'<div class="s"><div class="n">{comm_str}</div>'
+        f'<div class="k">AL pr\u016fm\u011br</div></div>'
+        f'<div class="s"><div class="n" style="color:{diff_color}">{diff:+.2f}</div>'
+        f'<div class="k">\u0394 od pr\u016fm\u011bru</div></div>'
+        + (f'<div class="s"><div class="n pos">{enr.pred:.1f}</div>'
+           f'<div class="k">pred. sk\xf3re ({enr.pred_lo:.1f}\u2013{enr.pred_hi:.1f})</div></div>'
+           if enr else "")
+        + '</div>'
+    )
+
+    # Spriznenene duse
+    raters_html = ""
+    if raters:
+        names = ", ".join(
+            f'<span style="color:{ACCENT2}">{_esc(nm)}</span>'
+            f'<span style="color:{MUT};font-size:11px"> r={_esc(str(sim))}</span>'
+            for nm, sim in raters[:5]
+        )
+        raters_html = (
+            f'<div class="note" style="margin-top:6px">'
+            f'sp\u0159\xedzn\u011bn\xe9 du\u0161e ({n_users}): {names}</div>'
+        )
+
+    # Proc / atributy z enr
+    why_html = ""
+    if enr and enr.why:
+        why_parts = []
+        for lab, cat, val in enr.why:
+            sign = "pos" if val >= 0 else "neg"
+            why_parts.append(f'<span class="{sign}">{_esc(lab)}</span>')
+        why = ", ".join(why_parts)
+        cl  = f'<span class="tag">{_esc(enr.cluster_name)}</span>' if enr.cluster_name else ""
+        why_html = f'<div class="why"><b>Pro\u010d:</b> {why} &nbsp;{cl}</div>'
+
+    # Seeds z item-CF
+    seeds_html = ""
+    if enr and enr.cf_seeds:
+        seeds_html = (
+            '<div class="note" style="margin-top:6px">proto\u017ee m\xe1\u0161 r\xe1d: '
+            + ", ".join(f'<i>{_esc(s)}</i>' for s in enr.cf_seeds)
+            + '</div>'
+        )
+
+    # Synopsis
+    syn_html = ""
+    synopsis = (enr.synopsis if enr else "") or ""
+    if synopsis:
+        syn = _esc(synopsis[:340] + ("\u2026" if len(synopsis) > 340 else ""))
+        syn_html = f'<div class="syn">{syn}</div>'
+
+    # Zdroje
+    sources = list(enr.sources) if enr else ["user-CF"]
+    if "user-CF" not in sources:
+        sources.append("user-CF")
+    src = " \xb7 ".join(_esc(s) for s in sources)
+
+    return (
+        f'<div class="rec">'
+        f'<div class="rank">{rank:02d}</div>'
+        f'<a href="{mal_url}" target="_blank" style="text-decoration:none;color:inherit">'
+        f'<div class="t">{title}{flag}</div></a>'
+        f'<div style="margin:2px 0 4px">{ten}</div>'
+        + scores_html
+        + why_html
+        + raters_html
+        + seeds_html
+        + syn_html
+        + f'<div class="src" style="margin-top:10px">zdroj: {src}</div>'
+        f'</div>'
+    )
+
+
+def render_cf_recommendations_html(
+    cf_recs: list[dict],
+    out_path: str,
+    userinfo: dict = None,
+    enr_data: dict = None,
+) -> str:
+    """Standalone HTML report pro vysledky user-based CF, karta-style."""
+    parts = [_head("CF doporu\u010den\xed \u2014 animodel")]
+    parts.append('<p class="kicker">animodel \xb7 user-based collaborative filtering</p>')
+    parts.append('<h1>Doporu\u010den\xed<br><em>od sp\u0159\xedzn\u011bn\xfdch du\u0161\xed</em></h1>')
+    parts.append(
+        f'<p class="lead">'
+        f'{len(cf_recs)} titul\u016f nalezen\xfdch p\u0159es podobn\xe9 u\u017eivatele na AniList. '
+        f'CF sk\xf3re\xa0=\xa0pr\u016fm\u011br komunity\xa0+\xa0v\xe1\u017een\xe1 odchylka sp\u0159\xedn\u011bn\xfdch du\u0161\xed. '
+        f'Kladn\xe1\xa0\u0394\xa0=\xa0sp\u0159\xedn\u011bn\xe9 du\u0161e hodnotow\xed v\xfd\u0161 ne\u017e komunita. '
+        f'Se\u0159azeno sestupn\u011b dle CF sk\xf3re.</p>'
+    )
+    for i, r_cf in enumerate(cf_recs, 1):
+        mid = r_cf.get("mal_id")
+        enr = (enr_data or {}).get(mid)
+        parts.append(_cf_rec_card(r_cf, enr, i))
+    parts.append(_foot())
+    out = "\n".join(parts)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(out)
+    return out_path
+

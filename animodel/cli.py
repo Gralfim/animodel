@@ -112,6 +112,46 @@ def run(args) -> int:
         top_per_cluster=cfg.recommend.top_per_cluster,
     )
     print(f"      → {mood_html}")
+
+    # CF standalone report — generuje se jen pokud use_user_cf a jsou výsledky
+    cf_recs = getattr(rec, "_cf_raw_results", [])
+    if cfg.recommend.use_user_cf and cf_recs:
+        cf_html = os.path.join(cfg.out_dir, "cf_recommendations.html")
+
+        # Primární zdroj titulů: enriched Recommendation objekty z recs_all
+        enr_data = {r.mal_id: r for r in recs_all if r.mal_id}
+
+        # Doplňující zdroj: AniList batch query pro CF tituly chybějící v enr_data
+        # (tituly které CF našlo, ale enricher vyloučil — např. nehodnocené sledované)
+        missing_ids = [
+            r["mal_id"] for r in cf_recs
+            if r.get("mal_id") and r["mal_id"] not in enr_data
+            and not r.get("title")   # title_store ho nemá — potřebujeme lookup
+        ]
+        al_titles: dict[int, str] = {}
+        al_titles_en: dict[int, str] = {}
+        if missing_ids and rec.enr.anilist:
+            al_batch = rec.enr.anilist.get_anime_batch(
+                missing_ids, show_progress=False
+            )
+            for mid, adata in al_batch.items():
+                if adata:
+                    t = adata.get("title") or {}
+                    al_titles[mid]    = t.get("romaji") or t.get("english") or ""
+                    al_titles_en[mid] = t.get("english") or ""
+
+        # Přidej al_titles do cf_recs jako fallback (in-place, jen pro chybějící)
+        for r in cf_recs:
+            mid = r.get("mal_id")
+            if mid and not r.get("title") and mid in al_titles:
+                r["title"]    = al_titles[mid]
+                r["title_en"] = al_titles_en.get(mid, "")
+
+        report.render_cf_recommendations_html(cf_recs, cf_html, userinfo, enr_data)
+        print(f"      → {cf_html}  ({len(cf_recs)} CF titulů)")
+    elif cfg.recommend.use_user_cf:
+        print("      [CF report přeskočen — žádné výsledky]")
+
     print("[hotovo]")
     return 0
 
