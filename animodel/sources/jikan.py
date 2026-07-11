@@ -1,5 +1,5 @@
 """
-jikan_client.py — Jikan API v4 klient s cachováním a rate limitingem
+jikan.py — Jikan API v4 klient s cachováním a rate limitingem
 
 Jikan je neoficiální REST API pro MyAnimeList.
 Dokumentace: https://docs.api.jikan.moe/
@@ -11,6 +11,8 @@ import time
 import logging
 from pathlib import Path
 import requests
+
+from . import progress, progress_done, Result, is_permanent_status
 
 log = logging.getLogger(__name__)
 
@@ -44,47 +46,91 @@ class JikanClient:
         f = self._cache_file(key)
         f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _get(self, endpoint: str) -> dict:
-        """Provede GET request s cachováním, rate limitingem a retry logikou."""
-        cached = self._load_cache(endpoint)
-        if cached is not None:
-            return cached
-
-        # Rate limiting
+    def _request(self, endpoint: str) -> Result:
+        """
+        Čistě síťová vrstva -- BEZ cache. Vrací Result(ok, data, permanent).
+        Cachováním se zabývá výhradně _get() níž, tohle je jediné, co dělá
+        request samotný, takže se dá i samostatně testovat/mockovat.
+        """
         elapsed = time.time() - self._last_request
         if elapsed < REQUEST_DELAY:
             time.sleep(REQUEST_DELAY - elapsed)
 
         url = f"{BASE_URL}/{endpoint}"
-        for attempt, delay in enumerate(RETRY_DELAYS + [None]):
+        for attempt in range(len(RETRY_DELAYS) + 1):
             try:
                 resp = self.session.get(url, timeout=15)
                 self._last_request = time.time()
 
                 if resp.status_code == 429:
                     wait = RETRY_DELAYS[attempt] if attempt < len(RETRY_DELAYS) else 60
-                    log.warning(f"Rate limit 429, čekám {wait}s…")
+                    # INFO, ne WARNING: běžný, očekávaný jev u rate-limitovaného
+                    # API, co se vyřeší samo -- teprve VYČERPÁNÍ pokusů (níž)
+                    # je něco, co má smysl vypíchnout jako warning/error.
+                    log.info(f"Rate limit 429, čekám {wait}s…")
                     time.sleep(wait)
                     continue
 
                 if resp.status_code == 404:
-                    # Anime neexistuje nebo je NSFW — uložíme None do cache
-                    self._save_cache(endpoint, None)
-                    return None
+                    # Anime neexistuje nebo je NSFW — potvrzeně natrvalo.
+                    return Result.failure(permanent=True)
+
+                if is_permanent_status(resp.status_code):
+                    # 400/422 -- request samotný je špatně (neplatné ID
+                    # apod.), retry se stejnou URL by dopadl stejně. Vzdej
+                    # se hned, neplýtvej celým 2+5+10+30s retry schedulem.
+                    log.warning(f"Jikan natrvalo selhal (nebude se opakovat): "
+                                f"HTTP {resp.status_code} {url}")
+                    return Result.failure(permanent=True)
 
                 resp.raise_for_status()
-                data = resp.json()
-                self._save_cache(endpoint, data)
-                return data
+                return Result.success(resp.json())
 
             except requests.RequestException as e:
+                # Sem se dostaneme jen pro kódy MIMO is_permanent_status
+                # (ty jsou zachyceny výš, ještě před raise_for_status) --
+                # typicky 5xx, nebo čistě síťová chyba bez odpovědi vůbec.
                 if attempt < len(RETRY_DELAYS) - 1:
                     log.warning(f"Chyba {e}, retry za {RETRY_DELAYS[attempt]}s…")
                     time.sleep(RETRY_DELAYS[attempt])
                 else:
                     log.error(f"Selhalo po {MAX_RETRIES} pokusech: {url}")
-                    return None
+                    return Result.failure(permanent=False)
 
+        # Sem se dřív dalo dojít tiše (opakované 429 vyčerpaly všechny pokusy
+        # bez jediného log.error) -- na rozdíl od větve se síťovou výjimkou
+        # výš, která error loguje vždy. Titul, co se opakovaně rate-limitoval,
+        # tak potichu zmizel z výsledků beze stopy proč.
+        log.error(f"Selhalo po {MAX_RETRIES} pokusech (rate limit): {url}")
+        return Result.failure(permanent=False)
+
+    def _get(self, endpoint: str) -> dict:
+        """
+        Cache-aware wrapper kolem _request() -- JEDINÉ místo v JikanClient,
+        které rozhoduje o zápisu do cache (dřív se to řešilo uvnitř
+        _get() samotného na 3 různých místech; teď je to jedna zřetelná
+        if/elif/else větev tady dole).
+        """
+        cached = self._load_cache(endpoint)
+        if cached is not None:
+            return cached
+
+        result = self._request(endpoint)
+
+        if result.ok:
+            self._save_cache(endpoint, result.data)
+            return result.data
+
+        if result.permanent:
+            # 400/404/422 -- retry by stejně nikdy neuspěl, bezpečné
+            # zacachovat "nenalezeno" natrvalo.
+            self._save_cache(endpoint, None)
+            log.info(f"Jikan {endpoint}: selhalo natrvalo -- cachuju jako nenalezeno")
+            return None
+
+        # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) -- NEUKLÁDÁME,
+        # ať to příští běh zkusí znovu.
+        log.warning(f"Jikan {endpoint}: dočasné selhání, cache beze změny")
         return None
 
     # ── Veřejné metody ─────────────────────────────────────────────
@@ -130,13 +176,13 @@ class JikanClient:
 
         for i, mal_id in enumerate(mal_ids):
             if show_progress and i % 10 == 0:
-                print(f"  Staff data: {i}/{total}…", end="\r")
+                progress(f"  Staff data: {i}/{total}…")
             staff = self.get_anime_staff(int(mal_id))
             results[mal_id] = staff  # může být prázdný list
 
         if show_progress:
             non_empty = sum(1 for v in results.values() if v)
-            print(f"  Staff stažen: {non_empty}/{total} titulů s daty.          ")
+            progress_done(f"  Staff stažen: {non_empty}/{total} titulů s daty.")
 
         return results
 
@@ -186,10 +232,7 @@ class JikanClient:
         Seřazeno sestupně dle počtu titulů.
         """
         from collections import defaultdict
-
-        DIRECTOR_POSITIONS = {"director", "series director"}
-        WRITER_POSITIONS   = {"script", "series composition", "screenplay",
-                              "original creator", "original story"}
+        from .attributes import DIRECTOR_POSITIONS, WRITER_POSITIONS  # sdílené s build_attributes()
 
         directors: dict[int, list] = defaultdict(lambda: ["", "", 0])
         writers:   dict[int, list] = defaultdict(lambda: ["", "", 0])
@@ -285,14 +328,14 @@ class JikanClient:
 
         for i, mal_id in enumerate(mal_ids):
             if show_progress and i % 10 == 0:
-                print(f"  Stahuji data: {i}/{total} ({i/total*100:.0f}%)…", end="\r")
+                progress(f"  Stahuji data: {i}/{total} ({i/total*100:.0f}%)…")
 
             data = self.get_anime(int(mal_id))
             if data:
                 results[mal_id] = data
 
         if show_progress:
-            print(f"  Staženo: {len(results)}/{total} titulů.          ")
+            progress_done(f"  Staženo: {len(results)}/{total} titulů.")
 
         return results
 

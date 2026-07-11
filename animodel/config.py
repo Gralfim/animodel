@@ -25,6 +25,13 @@ class EnrichCfg:
     use_anilist: bool = True
     anilist_min_rank: int = 30        # ignoruj okrajové AniList tagy (rank < 30 %)
     include_studios: bool = True
+    include_staff: bool = False       # signál po režisérech/scenáristech; navíc
+                                       # 1 Jikan volání na titul (/staff endpoint),
+                                       # proto default vypnuto -- zapni, když chceš
+                                       # cenu za první běh a mít to napojené
+    use_shikimori: bool = False       # další nezávislý zdroj "podobných anime"
+                                       # kandidátů (viz sources/shikimori.py) --
+                                       # default vypnuto, není naživo ověřené
 
 
 @dataclass

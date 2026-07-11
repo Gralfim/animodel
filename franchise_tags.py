@@ -1,0 +1,123 @@
+# Hand-tagged franchise dataset built from Jiri's actual MAL scores.
+# Attributes on 0-5 scale: emo(tearjerker intensity), rom(romance centrality),
+# com(comedy centrality/gag-driven), act(action centrality), deep(character depth/growth),
+# harem(ensemble/harem romance vs single pairing), fluff(low-stakes comfort vibe)
+# tier: 'fav' = his 9-10 score tier (used for cluster analysis of favorites)
+#       'ctrl' = 6-8 tier control/contrast examples (used only for regression signal)
+
+# columns: key, genres(list), emo, rom, com, act, deep, harem, fluff, score, tier
+
+FAV = [
+    ("5-toubun no Hanayome", ["romance","comedy","harem","school"], 3,5,4,1,3,5,3, 10, "fav"),
+    ("Bakemonogatari", ["supernatural","mystery","romance","psychological"], 3,3,3,2,4,2,1, 10, "fav"),
+    ("Domestic na Kanojo", ["romance","drama","school"], 5,5,1,0,4,2,0, 10, "fav"),
+    ("Golden Time", ["romance","drama","school"], 4,5,2,0,4,1,1, 10, "fav"),
+    ("Hige wo Soru. Soshite JK wo Hirou.", ["romance","drama","slice_of_life"], 4,5,2,0,4,0,2, 10, "fav"),
+    ("Kaoru Hana wa Rin to Saku", ["romance","drama","school","yuri"], 4,5,1,0,4,0,1, 10, "fav"),
+    ("Kimi no Na wa.", ["romance","drama","supernatural","fantasy"], 5,5,1,0,3,0,1, 10, "fav"),
+    ("Koi wa Ameagari no You ni", ["romance","drama","slice_of_life"], 4,5,1,0,4,0,1, 10, "fav"),
+    ("Kono Subarashii Sekai ni Shukufuku wo!", ["isekai","comedy","fantasy","parody"], 1,2,5,2,2,3,4, 10, "fav"),
+    ("Mushoku Tensei", ["isekai","fantasy","drama","ecchi"], 4,3,2,2,5,3,1, 10, "fav"),
+    ("Otonari no Tenshi-sama", ["romance","comedy","school","slice_of_life"], 3,5,3,0,3,0,3, 10, "fav"),
+    ("Sakura-sou no Pet na Kanojo", ["romance","comedy","drama","school"], 4,4,3,0,4,2,2, 10, "fav"),
+    ("Seishun Buta Yarou (Bunny Girl Senpai)", ["romance","supernatural","drama","psychological"], 4,5,2,1,4,1,1, 10, "fav"),
+    ("Shigatsu wa Kimi no Uso", ["music","romance","drama"], 5,4,1,0,4,0,0, 10, "fav"),
+    ("Shokugeki no Souma", ["cooking","comedy","ecchi","competition"], 2,1,4,1,2,1,3, 10, "fav"),
+    ("Sousou no Frieren", ["fantasy","adventure","drama"], 4,0,1,2,5,0,2, 10, "fav"),
+    ("Steins;Gate", ["scifi","thriller","drama","psychological"], 5,2,2,1,4,0,0, 10, "fav"),
+    ("Alya-san", ["romance","comedy","school"], 3,5,4,0,3,0,3, 10, "fav"),
+    ("Toradora!", ["romance","comedy","drama","school"], 4,5,3,0,4,0,1, 10, "fav"),
+    ("Violet Evergarden", ["drama","fantasy"], 5,2,0,1,5,0,0, 10, "fav"),
+    ("Yofukashi no Uta S2", ["supernatural","romance","mystery"], 3,3,2,1,3,0,1, 10, "fav"),
+    ("Yuragi-sou no Yuuna-san", ["romance","comedy","ecchi","harem","supernatural"], 2,4,4,1,2,4,3, 10, "fav"),
+    ("2.5-jigen no Ririsa", ["romance","comedy","school"], 2,4,4,0,2,2,3, 9, "fav"),
+    ("Amagami-san Chi no Enmusubi", ["romance","comedy","slice_of_life"], 2,4,3,0,2,1,3, 9, "fav"),
+    ("Anohana", ["drama","supernatural"], 5,2,1,0,4,0,0, 9, "fav"),
+    ("Ao no Hako", ["romance","sports","school"], 3,5,2,1,3,0,2, 9, "fav"),
+    ("Aura Maryuuin Kouga Saigo no Tatakai", ["romance","drama","comedy"], 3,4,3,0,3,0,2, 9, "fav"),
+    ("B-gata H-kei", ["romance","comedy","ecchi"], 2,3,4,0,2,0,2, 9, "fav"),
+    ("Bakuman", ["drama","comedy","romance"], 3,2,3,0,4,0,1, 9, "fav"),
+    ("Boku dake ga Inai Machi (Erased)", ["mystery","thriller","drama","supernatural"], 5,1,0,2,4,0,0, 9, "fav"),
+    ("Boku no Kokoro no Yabai Yatsu S2", ["romance","comedy","school"], 3,5,3,0,3,0,2, 9, "fav"),
+    ("Boku wa Tomodachi ga Sukunai", ["romance","comedy","harem","school"], 2,3,4,0,2,4,3, 9, "fav"),
+    ("Bokutachi wa Benkyou ga Dekinai", ["romance","comedy","harem","school"], 2,4,4,0,2,4,3, 9, "fav"),
+    ("Chihayafuru", ["sports","drama","romance"], 3,2,1,1,4,1,1, 9, "fav"),
+    ("Chuunibyou demo Koi ga Shitai!", ["romance","comedy","school"], 2,4,4,0,3,0,3, 9, "fav"),
+    ("Clannad", ["drama","romance","supernatural","slice_of_life"], 5,4,2,0,5,2,1, 9, "fav"),
+    ("Date A Live (side entries)", ["romance","fantasy","harem","action"], 2,4,2,3,2,5,2, 9, "fav"),
+    ("DanMachi V", ["fantasy","isekai","action","harem"], 2,2,1,4,2,3,1, 9, "fav"),
+    ("Fate/stay night UBW", ["fantasy","action","drama","supernatural"], 3,2,1,4,3,1,0, 9, "fav"),
+    ("Fruits Basket", ["drama","romance","supernatural"], 5,4,2,0,5,2,1, 9, "fav"),
+    ("Fuufu Ijou, Koibito Miman.", ["romance","drama"], 3,5,2,0,3,0,2, 9, "fav"),
+    ("Girls & Panzer (movies)", ["sports","comedy","military","school"], 1,0,3,3,2,0,3, 9, "fav"),
+    ("Gokukoku no Brynhildr", ["supernatural","drama","tragedy","scifi"], 4,2,1,3,3,2,0, 9, "fav"),
+    ("Grisaia", ["drama","romance","harem","psychological"], 4,4,2,1,4,4,1, 9, "fav"),
+    ("Hayate no Gotoku!!", ["comedy","romance","harem","parody"], 1,2,5,1,1,4,3, 9, "fav"),
+    ("Josee to Tora to Sakana-tachi", ["romance","drama"], 5,4,0,0,4,0,0, 9, "fav"),
+    ("Kaichou wa Maid-sama!", ["romance","comedy","school"], 2,4,3,0,2,0,3, 9, "fav"),
+    ("Kami nomi zo Shiru Sekai", ["comedy","romance","supernatural","harem"], 1,3,5,0,1,4,3, 9, "fav"),
+    ("Kanojo, Okarishimasu S3", ["romance","comedy","harem"], 2,4,4,0,2,3,2, 9, "fav"),
+    ("Kimi ni Todoke", ["romance","drama","school"], 3,5,2,0,4,0,1, 9, "fav"),
+    ("100-nin no Kanojo", ["romance","comedy","harem"], 2,4,5,0,2,5,3, 9, "fav"),
+    ("Kimi no Suizou wo Tabetai", ["drama","romance"], 5,4,0,0,4,0,0, 9, "fav"),
+    ("Kimi wa Houkago Insomnia", ["romance","drama","slice_of_life"], 3,4,1,0,3,0,2, 9, "fav"),
+    ("Koe no Katachi", ["drama","romance"], 5,3,0,0,5,0,0, 9, "fav"),
+    ("Kokoro ga Sakebitagatterunda", ["drama","romance"], 5,3,0,0,4,0,0, 9, "fav"),
+    ("Kusuriya no Hitorigoto", ["mystery","drama","historical","romance"], 2,1,2,0,4,0,1, 9, "fav"),
+    ("Make Heroine ga Oosugiru!", ["romance","comedy","school"], 2,4,4,0,3,1,3, 9, "fav"),
+    ("NHK ni Youkoso!", ["drama","psychological","comedy"], 4,2,2,0,5,0,0, 9, "fav"),
+    ("Nande Koko ni Sensei ga!?", ["romance","comedy","ecchi","school"], 1,2,5,0,1,1,3, 9, "fav"),
+    ("Nihon e Youkoso Elf-san.", ["isekai","comedy","ecchi","harem"], 1,2,4,0,1,3,3, 9, "fav"),
+    ("Plastic Memories", ["drama","romance","scifi"], 5,4,1,0,4,0,0, 9, "fav"),
+    ("Re:Zero (S1/S2)", ["isekai","drama","psychological","fantasy","thriller"], 5,3,1,2,5,1,0, 9, "fav"),
+    ("ReLIFE", ["drama","romance","school"], 3,3,1,0,4,0,1, 9, "fav"),
+    ("Saenai Heroine no Sodatekata", ["romance","comedy","harem"], 2,3,4,0,2,4,2, 9, "fav"),
+    ("Seihantai na Kimi to Boku", ["romance","comedy","school"], 2,5,3,0,2,0,3, 9, "fav"),
+    ("Shimoneta", ["comedy","ecchi","school"], 1,1,5,0,1,1,3, 9, "fav"),
+    ("Skip to Loafer", ["slice_of_life","romance","drama"], 2,2,1,0,4,0,3, 9, "fav"),
+    ("Sono Bisque Doll wa Koi wo Suru", ["romance","comedy","hobby"], 3,5,3,0,3,0,3, 9, "fav"),
+    ("Spy x Family", ["comedy","action","family"], 2,0,4,2,2,0,4, 9, "fav"),
+    ("Suzumiya Haruhi no Shoushitsu", ["scifi","comedy","mystery","supernatural","school"], 2,2,3,1,3,1,1, 9, "fav"),
+    ("Sword Art Online", ["isekai","action","fantasy","romance"], 2,3,1,4,2,2,1, 9, "fav"),
+    ("Tonikaku Kawaii", ["romance","comedy","slice_of_life","fantasy"], 2,4,3,0,2,0,4, 9, "fav"),
+    ("White Album 2", ["romance","drama","music"], 5,5,0,0,4,1,0, 9, "fav"),
+    ("Yahari Ore no Seishun Love Comedy", ["romance","comedy","drama","school"], 3,4,3,0,4,1,1, 9, "fav"),
+    ("Yosuga no Sora", ["romance","drama","ecchi","psychological"], 3,4,0,0,3,1,0, 9, "fav"),
+    ("Youjo Senki", ["isekai","military","fantasy","psychological"], 2,0,1,4,3,0,0, 9, "fav"),
+    ("Classroom of the Elite", ["psychological","school","drama","thriller"], 2,1,0,1,4,1,0, 9, "fav"),
+    ("Zero no Tsukaima", ["isekai","fantasy","romance","comedy","harem"], 2,4,3,2,2,3,2, 9, "fav"),
+    ("[Oshi no Ko]", ["drama","mystery","psychological","showbiz"], 4,1,1,1,4,0,0, 9, "fav"),
+]
+
+CTRL = [
+    # NOTE: Kaguya-sama wa Kokurasetai deliberately excluded. Confirmed by Jiri: the low
+    # score (6-7) was driven by an idiosyncratic dislike of the narrator device/gimmick,
+    # not by genre/depth/comedy attributes (the one TV Special without that narrator scored
+    # an 8 despite a "weaker plot" by his own account). This is a confound outside our
+    # tagged feature space -> including it with any score would just inject noise into the
+    # regression, so we treat it as a labeled anomaly and drop it rather than force-fit it.
+    ("To LOVE-Ru", ["romance","comedy","ecchi","harem"], 1,2,4,1,1,5,3, 6, "ctrl"),
+    ("Sora no Otoshimono", ["romance","comedy","ecchi","harem"], 1,2,4,1,1,4,3, 7, "ctrl"),
+    ("Ouran Koukou Host Club", ["romance","comedy","school","harem"], 2,3,4,0,2,3,3, 6, "ctrl"),
+    ("Ranma 1/2 (original)", ["romance","comedy","martial_arts","ecchi"], 1,2,4,2,1,2,3, 6.5, "ctrl"),
+    # High School DxD deliberately excluded: score=0 on all 4 seasons means it's one of
+    # the confirmed "seen before careful MAL use" legacy entries (verified with Jiri) --
+    # no real score exists, so treating it as ~5.5 "low enthusiasm" would have been
+    # fabricating a data point exactly like the Kaguya-sama mistake.
+    ("Overlord", ["fantasy","action","isekai","dark"], 2,0,1,4,3,0,0, 7, "ctrl"),
+    ("Highschool of the Dead", ["action","ecchi","horror"], 1,1,1,5,1,3,1, 7, "ctrl"),
+    ("Nisekoi", ["romance","comedy","harem","school"], 2,3,4,0,1,4,3, 7, "ctrl"),
+    ("Shinsekai yori", ["scifi","psychological","thriller","drama"], 3,1,0,2,4,0,0, 7, "ctrl"),
+    ("Isekai Quartet", ["isekai","comedy","parody"], 1,1,4,1,1,4,4, 8, "ctrl"),
+    ("Horimiya", ["romance","comedy","school","drama"], 3,4,3,0,3,0,2, 8, "ctrl"),
+    ("Kanojo, Okarishimasu (avg S1/S2/S4)", ["romance","comedy","harem"], 2,4,4,0,2,3,2, 8, "ctrl"),
+    ("Tate no Yuusha no Nariagari (S1-2)", ["isekai","action","fantasy","drama"], 2,2,1,4,3,1,0, 8, "ctrl"),
+    ("Fate/Zero", ["fantasy","action","drama","psychological"], 3,1,0,4,4,0,0, 8, "ctrl"),
+    ("Hyouka", ["mystery","slice_of_life","romance"], 2,2,1,0,4,0,2, 8, "ctrl"),
+    ("Girls & Panzer (TV)", ["sports","comedy","military","school"], 1,0,3,3,2,0,3, 8, "ctrl"),
+    ("Yamada-kun to Lv999", ["romance","comedy"], 2,4,3,0,2,0,3, 8, "ctrl"),
+    ("Yubisaki to Renren", ["romance","drama","slice_of_life"], 3,4,1,0,3,0,2, 8, "ctrl"),
+    ("Karakai Jouzu no Takagi-san", ["romance","comedy","school"], 1,3,4,0,1,0,4, 8, "ctrl"),
+]
+
+ALL = FAV + CTRL

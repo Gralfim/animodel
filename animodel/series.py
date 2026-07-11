@@ -141,8 +141,18 @@ def aggregate_entries(
         → příznaky se počítají z dat zástupce
 
     Vrací nový list MalEntry záznamů (jeden per série/standalone).
+
+    POZN. (code review, 2026): tahle funkce se nikde nevolá -- enrich.py
+    aktivně používá jiný přístup (váha 1/√k na každého člena franšízy místo
+    kolapsu na jeden reprezentativní záznam, viz Enricher.build_titles).
+    Rozbitý import teď opravuju, protože si nejsem jistý, jestli byl tenhle
+    přístup záměrně nahrazen tím váhovým, nebo je to jen rozpracovaná
+    alternativa -- ale NEnapojuju to do pipeline, protože mít aktivně obě
+    najednou (kolaps i váhu) by dalo dvě si konkurující franšízová řešení.
+    Necháváš na svém uvážení, jestli tuhle funkci chceš (a k čemu přesně --
+    např. jako alternativní --aggregate-mode přepínač), nebo smazat.
     """
-    from mal_parser import MalEntry
+    from .mal import MalEntry
 
     mal_ids   = [e.mal_id for e in entries]
     entry_map = {e.mal_id: e for e in entries}

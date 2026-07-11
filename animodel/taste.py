@@ -51,11 +51,26 @@ from .attributes import AttrValue
 # ── Lexikon "emocionální náročnosti" (osa únavy) ────────────────────────────
 # Reziduum říká CO mám rád; tahle osa říká, jak je daný titul EMOČNĚ náročný,
 # aby šlo doporučení filtrovat podle aktuální nálady / únavy.
+#
+# POZN. (code review, 2026): tohle je ručně udržovaný seznam, což je přesně
+# to, co si zbytek `attributes.py` explicitně zakazuje jako princip. Nechávám
+# ho -- osa náročnosti potřebuje NĚJAKÝ prior, který z dat samotných nejde
+# odvodit stejně čistě jako "co mám rád" -- ale položky jsem přes web search
+# ověřil proti reálné AniList tagové/žánrové taxonomii, kde to šlo.
+# Přímo potvrzené (AniList tag nebo genre): tragedy, survival, war, politics,
+# philosophy, suicide, gore, bullying, dystopian, psychological, horror,
+# thriller, drama, military, suspense (MAL genre, ne AniList, ale platí stejně).
+# NEpotvrzené, ponechané jako best-guess (běžné koncepty, ale nenašel jsem
+# přímý důkaz): death, depression, crime. Odstraněno bez náhrady (žádný důkaz
+# a riziko, že v `canon()` výstupu nikdy nic netrefí): "loss", "grief",
+# "existential", "trauma", "mature_themes", "organized_crime".
+# Použij `TasteModel.unmatched_intensity_keywords()` po reálném fit() -- řekne
+# přesně, co z týhle sady v tvých datech nikdy nic netrefilo, ať se časem dá
+# doladit podle skutečnosti, ne odhadu (můj i cizí).
 HEAVY = {
     "drama", "tragedy", "psychological", "gore", "war", "military", "death",
     "suspense", "thriller", "philosophy", "bullying", "suicide", "depression",
-    "trauma", "dystopian", "survival", "horror", "politics", "crime",
-    "organized_crime", "mature_themes", "loss", "grief", "existential",
+    "dystopian", "survival", "horror", "politics", "crime",
 }
 LIGHT = {
     "comedy", "slice_of_life", "cute_girls_doing_cute_things", "healing",
@@ -104,7 +119,7 @@ class Cluster:
     size: int
     mean_user_score: float
     intensity: float                 # −1 (lehké) … +1 (náročné)
-    signature: list                  # [(label, category, distinctiveness), ...]
+    signature: list                  # [(key, label, category, distinctiveness), ...]
     members: list                    # [(mal_id, title, user_score), ...] seřazeno
 
 
@@ -124,6 +139,7 @@ class TasteModel:
         self.titles: list[Title] = []
         self.b0: float = 0.0
         self.effects: dict[str, AttrEffect] = {}
+        self.all_attr_keys: set[str] = set()
         self.interactions: list[Interaction] = []
         self.scale: float = 1.0           # globální faktor s z cross-validace
         self.cv_rmse: float = 0.0
@@ -133,7 +149,7 @@ class TasteModel:
 
     # ── Fit ──────────────────────────────────────────────────────────────────
 
-    def fit(self, titles: list[Title]):
+    def fit(self, titles: list[Title], n_clusters: int | None = None):
         self.titles = [t for t in titles if t.user_score > 0]
         if len(self.titles) < 20:
             raise ValueError(f"Příliš málo ohodnocených titulů ({len(self.titles)}).")
@@ -143,7 +159,12 @@ class TasteModel:
         self._fit_effects()
         self._fit_interactions()
         self._calibrate_scale()
-        self._fit_clusters()
+        # n_clusters se předává rovnou sem -- dřív se klastrovalo jednou tady
+        # (vždy s k=None/auto, config se ignoroval) a pak ZNOVU explicitně
+        # v cli.py s cfg.model.n_clusters, což zdvojovalo celý KMeans+silhouette
+        # search zbytečně na každém běhu (ověřeno živě: druhé volání přepisovalo
+        # výsledek prvního, ne ho doplňovalo).
+        self._fit_clusters(n_clusters)
         return self
 
     # ── Baseline: můj průměr + sklon vůči komunitě ───────────────────────────
@@ -185,6 +206,12 @@ class TasteModel:
             for key, av in t.attrs.items():
                 bucket[key].append((e, av.weight * t.weight, t))
                 meta[key] = av
+
+        # Všechny pozorované klíče, i pod min_attr_count -- effects (níž) filtruje
+        # na "dost důkazů pro fitnutý efekt", ale intensity_of() atributy čte
+        # přímo z Title.attrs bez ohledu na to. Diagnostika HEAVY/LIGHT proto
+        # musí kontrolovat proti TOMHLE, ne proti self.effects.keys().
+        self.all_attr_keys: set[str] = set(bucket.keys())
 
         self.effects = {}
         for key, rows in bucket.items():
@@ -393,7 +420,13 @@ class TasteModel:
                 if distinct[si] <= 0:
                     continue
                 key = feat_keys[si]
-                signature.append((self.effects[key].label,
+                # key se teď nese dál -> recommend.py._cluster_fit ho nemusí
+                # zpětně dohledávat lineárním průchodem přes všechny effects
+                # podle (label, category) -- bylo to zbytečně pomalé (dělalo
+                # se to pro každého kandidáta × každý klastr × každou položku
+                # signatury) a teoreticky křehké, kdyby dva různé atributy
+                # měly stejný label i kategorii.
+                signature.append((key, self.effects[key].label,
                                   self.effects[key].category,
                                   float(distinct[si])))
             mem = sorted(
@@ -401,7 +434,7 @@ class TasteModel:
                 key=lambda x: -x[2])
             mean_score = sum(m[2] for m in mem) / len(mem)
             inten = sum(self.intensity_of(meta[i].attrs) for i in members_i) / len(members_i)
-            name = " / ".join(s[0] for s in signature[:3]) or f"Klastr {c+1}"
+            name = " / ".join(s[1] for s in signature[:3]) or f"Klastr {c+1}"
             clusters.append(Cluster(
                 idx=c, name=name, size=len(mem),
                 mean_user_score=mean_score, intensity=inten,
@@ -425,3 +458,21 @@ class TasteModel:
         elif sign < 0:
             items = [e for e in items if e.effect < 0]
         return sorted(items, key=lambda e: -abs(e.effect))[:n]
+
+    def unmatched_intensity_keywords(self) -> dict[str, list[str]]:
+        """
+        Diagnostika HEAVY/LIGHT lexikonu (viz komentář výše): vrátí, které
+        klíče z něj se v datech tohoto uživatele NIKDY neobjevily jako
+        pozorovaný atribut (tj. `canon()` je nikdy netrefil). Volej AŽ PO
+        fit() -- potřebuje self.effects postavené z reálných dat.
+
+        Nenulový výsledek neznamená nutně chybu (uživatel prostě nemusí mít
+        v listu nic s tím tagem), ale u víc než pár položek stojí za to
+        zkontrolovat přes list_all_tags(), jestli jde o reálný kanonický
+        název, nebo o odhad, který nikdy nic netrefí.
+        """
+        seen = self.all_attr_keys
+        return {
+            "heavy": sorted(k for k in HEAVY if k not in seen),
+            "light": sorted(k for k in LIGHT if k not in seen),
+        }

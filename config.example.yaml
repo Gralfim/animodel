@@ -17,6 +17,11 @@ enrich:
   use_anilist: true
   anilist_min_rank: 30      # ignoruj okrajové AniList tagy (rank < 30 %)
   include_studios: true
+  include_staff: false      # signál po režisérech/scenáristech (nové) — stojí
+                            # navíc 1 Jikan volání na titul (/staff endpoint)
+  use_shikimori: false      # další nezávislý zdroj "podobných anime" kandidátů
+                            # (viz sources/shikimori.py) — naživo neověřeno,
+                            # zkontroluj tvar odpovědi před ostrým zapnutím
 
 recommend:
   high_score: 8.0           # od jaké známky brát titul jako seed

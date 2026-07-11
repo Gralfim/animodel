@@ -253,7 +253,7 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         else:
             pill = f'<span class="pill mix">smíšené · {c.intensity:+.2f}</span>'
         sig = "".join(f'<span class="tag cat-{_esc(cat)}">{_esc(lab)}</span>'
-                      for lab, cat, _ in c.signature[:6])
+                      for _key, lab, cat, _dist in c.signature[:6])
         mem = " · ".join(_esc(m[1]) for m in c.members[:6])
         parts.append(
             f'<div class="cl"><div class="name">{_esc(c.name)}</div>'
@@ -445,7 +445,7 @@ def render_cluster_recommendations_html(
                 pill = f'<span class="pill mix">smíšené · {meta.intensity:+.2f}</span>'
             sig = "".join(
                 f'<span class="tag cat-{_esc(cat)}">{_esc(lab)}</span>'
-                for lab, cat, _ in meta.signature[:6]
+                for _key, lab, cat, _dist in meta.signature[:6]
             )
             meta_html = (
                 f'<div class="meta">'

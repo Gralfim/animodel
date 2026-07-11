@@ -148,7 +148,6 @@ entries, userinfo = parse_export("animelist.xml")
 completed = [e for e in split_by_status(entries)["Completed"] if e.score]
 titles = Enricher(cfg).build_titles(completed)
 model = TasteModel(shrinkage_k=cfg.model.shrinkage_k).fit(titles)
-model._fit_clusters(None)
 for e in model.top_effects(15, sign=1):
     print(e.label, round(e.effect, 2))
 ```

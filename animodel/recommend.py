@@ -30,12 +30,16 @@ PTW tituly se z vyhledávání NEvyřazují, jen se označí příznakem `ptw`.
 """
 from __future__ import annotations
 
+import logging
 import math
+import time
 from dataclasses import dataclass, field
 
 from .taste import TasteModel, Title
 from .enrich import Enricher, Enriched
 from .attributes import AttrValue
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,35 +106,98 @@ class Recommender:
         seeds = self._seeds(titles)
         seed_title_by_id = {t.mal_id: t.title for t in seeds}
 
-        # A1) item-based CF graf z MAL + AniList recommendations
-        for s in seeds:
-            try:
-                for r in self.enr.jikan.get_recommendations(s.mal_id):
-                    # váž hlasy podle toho, jak moc seed miluju (user_score nad průměr)
-                    w = max(0.1, s.user_score - self.model.u_mean + 1.0)
-                    bump(r["mal_id"], (1 + math.log1p(r.get("votes", 0))) * w,
-                         seed_title_by_id.get(s.mal_id), "MAL-rec")
-            except Exception:
-                pass
-            if self.enr.anilist:
-                try:
-                    for r in self.enr.anilist.get_recommendations(s.mal_id):
-                        w = max(0.1, s.user_score - self.model.u_mean + 1.0)
-                        bump(r["mal_id"], (1 + math.log1p(max(0, r.get("rating", 0)))) * w,
-                             seed_title_by_id.get(s.mal_id), "AniList-rec")
-                except Exception:
-                    pass
+        # Circuit breaker: klienti (jikan/anilist/shikimori) už sami zkoušej
+        # retry+backoff PRO JEDEN request -- ale když je celá služba dole
+        # (ne jen rate-limited), tohle by se opakovalo pro KAŽDÝ další seed
+        # zvlášť a natáhlo běh o desítky minut zbytečného čekání.
+        #
+        # DŮLEŽITÉ (ověřeno živě, viz diskuze): try/except kolem volání NIC
+        # nechytí, protože JikanClient/AniListClient/ShikimoriClient interní
+        # selhání sami pohlcují a vrací prázdný list/`None` -- nikdy
+        # nevyhodí výjimku ven (viz jejich _get()/_post(), poslední řádek je
+        # vždy `return None`/`return []`, ne `raise`). První verze tohohle
+        # breakeru byla postavená na except Exception a byla to fakticky
+        # mrtvá větev -- vypadalo to opraveně, ale nedělalo to nic (ověřeno
+        # instrumentovaným testem: 3 seedy pořád běžely celých ~85s KAŽDÝ,
+        # ne jen první). Měř místo toho ELAPSED TIME bez ohledu na to, jestli
+        # něco spadlo -- pomalá odpověď (protože klient interně vyčerpal
+        # retry) je jediný spolehlivý signál, co k dispozici je.
+        CIRCUIT_BREAKER_TIME_BUDGET = 20.0   # sekund promarněných na zdroj, než se zbytek dávky přeskočí
+        SLOW_CALL_THRESHOLD = 5.0            # rychlá odpověď (i "nic nenalezeno") netrvá takhle dlouho
+        fail_time = {"MAL-rec": 0.0, "AniList-rec": 0.0, "Shikimori": 0.0}
+        tripped: set[str] = set()
 
-        # A2) discovery přes tag-search na nejcharakterističtější atributy
+        def call_source(name, fn):
+            if name in tripped:
+                return []
+            t0 = time.time()
+            try:
+                result = fn() or []
+            except Exception as exc:
+                # klienti podle designu nevyhazují (viz pozn. výš), ale kdyby
+                # se sem přece jen něco nečekaného dostalo (programátorská
+                # chyba apod.), ať to nespadne celé -- jen zaloguj a pokračuj.
+                log.warning(f"{name}: neočekávaná výjimka pro seed: {exc}")
+                result = []
+            elapsed = time.time() - t0
+            if elapsed > SLOW_CALL_THRESHOLD:
+                fail_time[name] += elapsed
+                log.warning(
+                    f"{name}: pomalá odpověď ({elapsed:.0f}s, pravděpodobně vyčerpané "
+                    f"interní retry) -- promarněno celkem "
+                    f"{fail_time[name]:.0f}/{CIRCUIT_BREAKER_TIME_BUDGET:.0f}s"
+                )
+                if fail_time[name] >= CIRCUIT_BREAKER_TIME_BUDGET:
+                    tripped.add(name)
+                    log.error(
+                        f"{name}: {fail_time[name]:.0f}s promarněno na pomalých odpovědích -- "
+                        f"vynechávám zbytek dávky (vypadá to na nedostupnou službu, ne jen rate limit)"
+                    )
+            return result
+
+        # A1) item-based CF graf z MAL + AniList + Shikimori recommendations
+        for s in seeds:
+            recs = call_source("MAL-rec", lambda s=s: self.enr.jikan.get_recommendations(s.mal_id))
+            # candidates_per_seed byl definovaný v configu, ale nikde se
+            # nečetl -- změna hodnoty v config.yaml neměla žádný efekt.
+            for r in recs[: self.rc.candidates_per_seed]:
+                # váž hlasy podle toho, jak moc seed miluju (user_score nad průměr)
+                w = max(0.1, s.user_score - self.model.u_mean + 1.0)
+                bump(r["mal_id"], (1 + math.log1p(r.get("votes", 0))) * w,
+                     seed_title_by_id.get(s.mal_id), "MAL-rec")
+
+            if self.enr.anilist:
+                recs = call_source("AniList-rec", lambda s=s: self.enr.anilist.get_recommendations(s.mal_id))
+                for r in recs[: self.rc.candidates_per_seed]:
+                    w = max(0.1, s.user_score - self.model.u_mean + 1.0)
+                    bump(r["mal_id"], (1 + math.log1p(max(0, r.get("rating", 0)))) * w,
+                         seed_title_by_id.get(s.mal_id), "AniList-rec")
+
+            if self.enr.shikimori:
+                recs = call_source("Shikimori", lambda s=s: self.enr.shikimori.get_similar(s.mal_id))
+                # rank_hint = pozice v seznamu, ne potvrzené skóre podobnosti
+                # (viz sources/shikimori.py docstring) -- proto tu není
+                # log1p(votes)-style váhování jako u MAL/AniList-rec, jen
+                # přímo rank_hint (0-1) × seed-love váha.
+                for r in recs[: self.rc.candidates_per_seed]:
+                    w = max(0.1, s.user_score - self.model.u_mean + 1.0)
+                    bump(r["mal_id"], r.get("rank_hint", 0.5) * w,
+                         seed_title_by_id.get(s.mal_id), "Shikimori")
+
+        # A2) discovery přes tag-search na nejcharakterističtější atributy.
+        # Sdílí circuit breaker s "AniList-rec" výš (stejná služba) -- pokud
+        # AniList v A1 smyčce už spustil breaker, tenhle call se automaticky
+        # přeskočí taky, místo aby visel na svém vlastním internim retry.
         if self.enr.anilist:
             top_tags = [e.label for e in self.model.top_effects(n=40, sign=1)
                         if e.category in ("tag", "theme", "genre")][:8]
             if top_tags:
-                try:
-                    for m in self.enr.anilist.search_by_tags(top_tags[:5], pages=2):
-                        bump(m["mal_id"], 0.0, None, "tag-search")
-                except Exception:
-                    pass
+                matches = call_source(
+                    "AniList-rec",
+                    lambda: self.enr.anilist.search_by_tags(top_tags[:5], pages=2),
+                )
+                for m in matches:
+                    bump(m["mal_id"], 0.0, None, "tag-search")
 
         # B) user-based CF (volitelné)
         self._cf_raw_results = []  # reset před každým spuštěním
@@ -178,13 +245,13 @@ class Recommender:
         present = set(attrs)
         best_sim, best_name, best_score = 0.0, "", 0.0
         for c in self.model.clusters:
-            sig_keys = set()
-            # rekonstruuj klíče z labelů přes effects
-            for label, cat, _ in c.signature:
-                for k, e in self.model.effects.items():
-                    if e.label == label and e.category == cat:
-                        sig_keys.add(k)
-                        break
+            # klíč je teď přímo v signature (viz taste.py::_fit_clusters) --
+            # dřív se tady dělal lineární průchod přes VŠECHNY self.model.effects
+            # pro každou položku signatury, pro každý klastr, pro každého
+            # kandidáta v recommend() -- na stovkách efektů × stovkách/tisících
+            # kandidátů zbytečně drahé, a ke všemu křehké (shoda podle
+            # label+category by teoreticky mohla trefit jiný klíč).
+            sig_keys = {sig[0] for sig in c.signature}
             if not sig_keys:
                 continue
             inter = len(present & sig_keys)

@@ -1,5 +1,5 @@
 """
-anilist_client.py — AniList GraphQL klient s cachováním a rate limitingem
+anilist.py — AniList GraphQL klient s cachováním a rate limitingem
 
 AniList API: https://anilist.gitbook.io/anilist-apiv2-docs/
 GraphQL endpoint: https://graphql.anilist.co
@@ -18,6 +18,8 @@ import logging
 from pathlib import Path
 
 import requests
+
+from . import progress, progress_done, status, Result, is_permanent_status
 
 log = logging.getLogger(__name__)
 
@@ -140,8 +142,16 @@ class AniListClient:
 
     # ── HTTP helpers ───────────────────────────────────────────────────────────
 
-    def _post(self, query: str, variables: dict) -> dict | None:
-        """Provede GraphQL POST request s rate limitingem a retry logikou."""
+    def _request(self, query: str, variables: dict) -> Result:
+        """
+        Čistě síťová GraphQL vrstva -- BEZ cache. Vrací Result(ok, data, permanent).
+
+        Cachování řeší volající metody samy (get_anime, get_recommendations,
+        similar_users_recommendations, ...) -- každá má jiný cache formát/klíč,
+        takže se nedá centralizovat na jedno místo jako u JikanClient._get.
+        Ale všechny teď čtou klasifikaci ZE STEJNÉ návratové hodnoty, ne
+        z odděleného mutable stavu.
+        """
         elapsed = time.time() - self._last_request
         if elapsed < self._current_delay:
             time.sleep(self._current_delay - elapsed)
@@ -163,7 +173,10 @@ class AniListClient:
                     floor       = delay or RETRY_DELAYS[-1]
                     header_wait = int(resp.headers.get("Retry-After", 0) or 0)
                     wait        = max(floor, header_wait)
-                    log.warning(
+                    # INFO, ne WARNING: rate limit, co se sám vyřeší retry, je
+                    # u tohohle API běžný a očekávaný -- vyčerpání pokusů (dole
+                    # v except větvi) je to, co má smysl vypíchnout jako error.
+                    log.info(
                         f"Rate limit 429 (pokus {attempt+1}/{len(RETRY_DELAYS)+1}), "
                         f"čekám {wait}s (floor={floor}s, header={header_wait}s)…"
                     )
@@ -179,15 +192,19 @@ class AniListClient:
                     )
                     continue
 
-                # Pozn.: HTTP 404 NENÍ speciální případ "titul neexistuje".
-                # AniList GraphQL endpoint pro Media(idMal:) vrací při
-                # neexistujícím ID normální HTTP 200 s data.Media=null.
-                # Skutečný HTTP 404/400/500 zde znamená problém s requestem
-                # samotným (špatná URL, server down, malformed query) —
-                # tedy stejně jako ostatní chyby NESMÍ vést k trvalému
-                # zacachování "nenalezeno". Necháváme to padat do
-                # raise_for_status() níže, kde se to zaloguje a vrátí None
-                # bez zápisu do cache (o to se starají volající metody).
+                # Klasifikace se dělá TADY, přímo na status_code, ještě před
+                # raise_for_status() -- ne v except větvi níž. Dřív se to
+                # (pro 400/404/422 doručené jako HTTPError) muselo znovu
+                # vytahovat z výjimky (`getattr(e, "response", None)`), což
+                # byla druhá, mírně odlišná cesta ke stejnému rozhodnutí.
+                # Jedna kontrola na jednom místě = nemůže se rozjet.
+                if is_permanent_status(resp.status_code):
+                    body_excerpt = resp.text[:300].replace(chr(10), " ")
+                    log.warning(
+                        f"AniList natrvalo selhal (nebude se opakovat): "
+                        f"HTTP {resp.status_code} {body_excerpt!r}"
+                    )
+                    return Result.failure(permanent=True)
 
                 if not resp.ok:
                     body_excerpt = resp.text[:300].replace(chr(10), " ")
@@ -209,18 +226,24 @@ class AniListClient:
                         REQUEST_DELAY_BASE * (1.5 ** self._consecutive_429)
                     )
 
-                # GraphQL vrátí errors pole i při HTTP 200
+                # GraphQL vrátí errors pole i při HTTP 200. Klasifikováno jako
+                # "permanent" -- typicky jde o problém s konkrétními proměnnými
+                # (neplatné ID, špatný typ) u KONKRÉTNÍHO requestu, ne o
+                # dočasný stav serveru, takže retry se stejnými parametry by
+                # dopadl stejně. (Není to jistota pro každý myslitelný GraphQL
+                # error, ale je to výrazně častější případ než dočasná chyba.)
                 if "errors" in data:
                     err_msgs = [e.get("message", "?") for e in data["errors"]]
                     log.warning(f"GraphQL error(s): {'; '.join(err_msgs)}")
-                    return None
+                    return Result.failure(permanent=True)
 
-                return data
+                return Result.success(data)
 
             except requests.RequestException as e:
-                # Zachyť detail HTTP odpovědi pokud je k dispozici (status + tělo)
-                # — pomáhá odlišit "náš dotaz je špatně" (400) od
-                # "AniList má výpadek" (500/502/503).
+                # Sem už NIKDY nedorazí 400/404/422 -- ty jsou zachyceny výš,
+                # ještě před raise_for_status(). Tahle větev vidí jen 5xx
+                # (přes raise_for_status) nebo čistě síťovou chybu bez
+                # odpovědi vůbec (ConnectionError, Timeout) -- obojí transient.
                 detail = ""
                 resp_obj = getattr(e, "response", None)
                 if resp_obj is not None:
@@ -229,6 +252,7 @@ class AniListClient:
                         detail = f" | HTTP {resp_obj.status_code}: {body!r}"
                     except Exception:
                         pass
+
                 if attempt < len(RETRY_DELAYS) - 1:
                     log.warning(f"Request chyba ({e}){detail}, retry za {delay}s…")
                     time.sleep(delay)
@@ -237,9 +261,12 @@ class AniListClient:
                         f"AniList request selhal po {len(RETRY_DELAYS)+1} pokusech: "
                         f"{e}{detail}"
                     )
-                    return None
+                    return Result.failure(permanent=False)
 
-        return None
+        # Sem se dostaneme jen když KAŽDÝ pokus skončil na 429 (viz continue
+        # výš) -- vyčerpaný rate limit je transient, příští běh (nebo i
+        # jen o pár minut později) může uspět.
+        return Result.failure(permanent=False)
 
     # ── Veřejné metody ─────────────────────────────────────────────────────────
 
@@ -249,30 +276,45 @@ class AniListClient:
         Výsledek je cachován — opakované volání je okamžité.
 
         Vrátí None pokud anime na AniList neexistuje NEBO pokud request
-        selhal (rozdíl viz níže).
-        Vrátí {} (prázdný dict) pokud byl uložen jako potvrzeně nenalezený.
+        selhal dočasně (rozdíl viz níže).
+        Vrátí {} (prázdný dict) pokud byl uložen jako potvrzeně nenalezený
+        -- ať už proto, že AniList explicitně řekl "Media neexistuje", nebo
+        proto, že request selhal NATRVALO (400/404/422/GraphQL chyba) a
+        retry by stejně nikdy nepomohl.
 
-        Důležité: rozlišujeme dva různé důvody pro None:
-          1. _post() vrátí None kvůli SELHÁNÍ requestu (síť, 400, 500, timeout)
-             → NEUKLÁDÁME do cache, příští spuštění to zkusí znovu
-          2. Request uspěl, ale AniList potvrdil že Media neexistuje
+        Tři různé důvody pro None/{}:
+          1. _request() vrátí Result(ok=False, permanent=False) kvůli
+             DOČASNÉMU selhání (5xx, timeout, vyčerpaný rate limit) →
+             NEUKLÁDÁME do cache, příští spuštění to zkusí znovu
+          2. _request() vrátí Result(ok=False, permanent=True) kvůli
+             TRVALÉMU selhání (400/404/422/GraphQL chyba) → bezpečně
+             cachujeme {} -- retry by nikdy neuspěl
+          3. Request uspěl, ale AniList potvrdil že Media neexistuje
              (HTTP 200, data.Media = null) → bezpečně cachujeme {} sentinel
         """
         cached = self._load_cache(mal_id)
         if cached is not None:
             return cached if cached else None   # {} → None
 
-        result = self._post(QUERY_BY_MAL_ID, {"idMal": mal_id})
+        result = self._request(QUERY_BY_MAL_ID, {"idMal": mal_id})
 
-        if result is None:
-            # _post selhal (chyba/timeout/vyčerpané retries) — NEUKLÁDÁME.
-            log.warning(
-                f"AniList get_anime(MAL {mal_id}): request selhal, "
-                f"cache beze změny (zkusí se znovu příště)"
-            )
+        if not result.ok:
+            if result.permanent:
+                # Důvod 2: retry se stejným ID by dopadl stejně.
+                self._save_cache(mal_id, {})
+                log.info(
+                    f"AniList get_anime(MAL {mal_id}): request selhal natrvalo "
+                    f"(400/404/422/GraphQL) -- cachuju jako nenalezeno"
+                )
+            else:
+                # Důvod 1: NEUKLÁDÁME.
+                log.warning(
+                    f"AniList get_anime(MAL {mal_id}): request dočasně selhal, "
+                    f"cache beze změny (zkusí se znovu příště)"
+                )
             return None
 
-        media = result.get("data", {}).get("Media")
+        media = result.data.get("data", {}).get("Media")
         if media:
             self._save_cache(mal_id, media)
             return media
@@ -310,7 +352,7 @@ class AniListClient:
                 uncached.append(mal_id)
 
         if show_progress and uncached:
-            print(f"  AniList cache: {len(results)} hit, {len(uncached)} ke stažení…")
+            status(f"  AniList cache: {len(results)} hit, {len(uncached)} ke stažení…")
 
         if not uncached:
             return results
@@ -322,13 +364,10 @@ class AniListClient:
         for b_idx, batch in enumerate(batches):
             if show_progress:
                 done = b_idx * batch_size
-                print(
-                    f"  AniList stahování: {done}/{len(uncached)}…",
-                    end="\r"
-                )
+                progress(f"  AniList stahování: {done}/{len(uncached)}…")
 
-            result = self._post(QUERY_BATCH, {"ids": batch})
-            if result is None:
+            result = self._request(QUERY_BATCH, {"ids": batch})
+            if not result.ok:
                 # Batch request selhal (ne "nic se nenašlo") — fallback na
                 # jednotlivé requesty. get_anime() teď sám správně rozlišuje
                 # selhání od potvrzeného nenalezení, takže ani tady se
@@ -351,7 +390,7 @@ class AniListClient:
                     )
                 continue
 
-            media_list = result.get("data", {}).get("Page", {}).get("media", [])
+            media_list = result.data.get("data", {}).get("Page", {}).get("media", [])
 
             # Ulož do cache i results
             fetched_mal_ids = set()
@@ -368,7 +407,7 @@ class AniListClient:
                     self._save_cache(mal_id, {})
 
         if show_progress and uncached:
-            print(f"  AniList staženo: {len(results)}/{len(mal_ids)} titulů.          ")
+            progress_done(f"  AniList staženo: {len(results)}/{len(mal_ids)} titulů.")
 
         return results
 
@@ -472,23 +511,45 @@ class AniListClient:
     }"""
 
     def get_recommendations(self, mal_id: int) -> list[dict]:
-        """AniList doporučení k titulu: [{mal_id, title, rating, community}, ...]."""
+        """AniList doporučení k titulu: [{mal_id, title, rating, community}, ...].
+
+        Stejná opatrnost jako get_anime(): dočasné selhání se NEcachuje jako
+        "žádná doporučení" -- jinak by přechodný výpadek/vyčerpané retries
+        vypadaly navždy stejně jako titul, co doporučení skutečně nemá.
+        Trvalé selhání (400/404/422/GraphQL chyba) se ale cachuje jako
+        prázdný list -- retry by stejně nikdy nepomohl.
+        """
         ck = self.cache_path / f"rec_{mal_id}.json"
         if ck.exists():
             return json.loads(ck.read_text(encoding="utf-8"))
-        result = self._post(self.REC_QUERY, {"idMal": mal_id})
+        result = self._request(self.REC_QUERY, {"idMal": mal_id})
+        if not result.ok:
+            if result.permanent:
+                ck.write_text("[]", encoding="utf-8")
+                log.info(
+                    f"AniList get_recommendations(MAL {mal_id}): request selhal "
+                    f"natrvalo (400/404/422/GraphQL) -- cachuju jako prázdné"
+                )
+            else:
+                log.warning(
+                    f"AniList get_recommendations(MAL {mal_id}): request dočasně "
+                    f"selhal, cache beze změny (zkusí se znovu příště)"
+                )
+            return []
         out = []
-        if result:
-            nodes = (result.get("data", {}).get("Media", {}) or {}).get("recommendations", {}).get("nodes", [])
-            for n in nodes:
-                mr = n.get("mediaRecommendation") or {}
-                if mr.get("idMal"):
-                    out.append({
-                        "mal_id": mr["idMal"],
-                        "title": (mr.get("title") or {}).get("romaji", ""),
-                        "rating": n.get("rating", 0),
-                        "community": (mr.get("averageScore") or 0) / 10.0,
-                    })
+        nodes = (result.data.get("data", {}).get("Media", {}) or {}).get("recommendations", {}).get("nodes", [])
+        for n in nodes:
+            mr = n.get("mediaRecommendation") or {}
+            if mr.get("idMal"):
+                out.append({
+                    "mal_id": mr["idMal"],
+                    "title": (mr.get("title") or {}).get("romaji", ""),
+                    "rating": n.get("rating", 0),
+                    "community": (mr.get("averageScore") or 0) / 10.0,
+                })
+        # Sem se dostaneme jen když _request() skutečně uspěl (HTTP 200 + bez
+        # GraphQL "errors") -- prázdný `out` teď znamená potvrzeně žádná
+        # doporučení, ne nejistotu, takže je bezpečné to natrvalo zacachovat.
         ck.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
         return out
 
@@ -502,13 +563,14 @@ class AniListClient:
     }"""
 
     def search_by_tags(self, tags: list[str], pages: int = 2) -> list[dict]:
-        """Discovery: tituly s danými tagy, seřazené dle skóre."""
+        """Discovery: tituly s danými tagy, seřazené dle skóre. Necachuje se
+        (čistě průběžný discovery dotaz, ne perzistentní znalost o titulu)."""
         out = []
         for p in range(1, pages + 1):
-            result = self._post(self.TAG_SEARCH, {"tags": tags, "page": p})
-            if not result:
+            result = self._request(self.TAG_SEARCH, {"tags": tags, "page": p})
+            if not result.ok:
                 break
-            media = result.get("data", {}).get("Page", {}).get("media", [])
+            media = result.data.get("data", {}).get("Page", {}).get("media", [])
             for m in media:
                 if m.get("idMal"):
                     out.append({
@@ -589,9 +651,9 @@ class AniListClient:
         cached = self._load_cache(fallback_mal_id)
         if cached and isinstance(cached, dict) and cached.get("popularity"):
             return int(cached["popularity"])
-        result = self._post(self.QUERY_MEDIA_POPULARITY, {"id": anilist_id})
-        if result:
-            media = (result.get("data") or {}).get("Media") or {}
+        result = self._request(self.QUERY_MEDIA_POPULARITY, {"id": anilist_id})
+        if result.ok:
+            media = (result.data.get("data") or {}).get("Media") or {}
             return int(media.get("popularity") or 0)
         return 0
 
@@ -688,21 +750,20 @@ class AniListClient:
             cached_w = self._cf_load(ck)
             if cached_w is not None:
                 # Cache hit: použij uložené watchers
-                print(f"  user-CF: seed [{i+1}/{n}] z cache ({len(cached_w)} uživatelů)",
-                      end="\r")
+                progress(f"  user-CF: seed [{i+1}/{n}] z cache ({len(cached_w)} uživatelů)")
                 for uid, uname, raw in cached_w[:users_per_seed]:
                     user_profile[uid][mal_id] = self._norm_score(raw)
                     user_weight[uid] += seed_weight.get(mal_id, 1.0)
                     user_names[uid]   = uname
             else:
                 # Cache miss: stáhni a ulož
-                print(f"  user-CF: sbírám uživatele [{i+1}/{n}] (pop≈{pop_by_mal[mal_id]}) ...",
-                      end="\r")
+                progress(f"  user-CF: sbírám uživatele [{i+1}/{n}] (pop≈{pop_by_mal[mal_id]}) ...")
                 collected     = 0
                 page          = 1
                 per_page      = 50
                 fetched_w: list = []
                 fetch_failed  = False  # True = request selhal, ne legitimní konec
+                fetch_failed_permanent = False  # True = 400/404/422/GraphQL -- retry nikdy nepomůže
                 hit_page_cap  = False  # True = narazili jsme na MAX_WATCHER_PAGE
                 no_progress_streak = 0  # počet stránek po sobě bez nového uživatele
 
@@ -717,16 +778,21 @@ class AniListClient:
                         hit_page_cap = True
                         break
 
-                    result = self._post(
+                    result = self._request(
                         self.QUERY_USERS_BY_MEDIA,
                         {"mediaId": anilist_id, "page": page, "perPage": per_page},
                     )
-                    if result is None:
-                        # _post selhal (síť/400/500/timeout) — odliš od
+                    if not result.ok:
+                        # request selhal (síť/400/500/timeout) — odliš od
                         # legitimního konce výsledků (prázdné entries níže).
+                        # `result.permanent` je součástí TÉTO návratové
+                        # hodnoty, ne odděleného stavu klienta -- nejde ho
+                        # přečíst pozdě ani si ho nechat přepsat jiným
+                        # mezitímním voláním.
                         fetch_failed = True
+                        fetch_failed_permanent = result.permanent
                         break
-                    pg      = (result.get("data") or {}).get("Page") or {}
+                    pg      = (result.data.get("data") or {}).get("Page") or {}
                     entries = pg.get("mediaList") or []
                     if not entries:
                         break  # legitimní konec — žádná další data
@@ -773,18 +839,29 @@ class AniListClient:
                         f"pravděpodobně mnoho nehodnocených záznamů"
                     )
 
-                if fetch_failed:
-                    # NEUKLÁDÁME do cache — částečné výsledky jsme už použili
-                    # výše pro tento běh, ale příští spuštění má dostat šanci
-                    # stáhnout zbytek znovu, ne tvářit se že seed má jen
-                    # {len(fetched_w)} uživatelů natrvalo.
+                if fetch_failed and not fetch_failed_permanent:
+                    # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) --
+                    # NEUKLÁDÁME do cache. Částečné výsledky (fetched_w) jsme
+                    # už použili výše pro tento běh, ale příští spuštění má
+                    # dostat šanci stáhnout zbytek znovu, ne tvářit se že seed
+                    # má jen {len(fetched_w)} uživatelů natrvalo.
                     log.warning(
                         f"user-CF seed MAL {mal_id} (AL {anilist_id}): "
-                        f"request selhal po {len(fetched_w)} získaných "
+                        f"request dočasně selhal po {len(fetched_w)} získaných "
                         f"uživatelích (stránka {page}) — cache NEUKLÁDÁM"
                     )
                 else:
+                    # Buď žádné selhání, nebo selhání NATRVALO (400/404/422/
+                    # GraphQL chyba) -- retry se stejnými parametry by dopadl
+                    # stejně, takže i částečný/prázdný výsledek je bezpečné
+                    # zacachovat jako konečný.
                     self._cf_save(ck, fetched_w)
+                    if fetch_failed_permanent:
+                        log.info(
+                            f"user-CF seed MAL {mal_id} (AL {anilist_id}): "
+                            f"request selhal natrvalo (400/404/422/GraphQL) -- "
+                            f"cachuju {len(fetched_w)} částečných výsledků jako konečné"
+                        )
                     log.debug(
                         f"user-CF seed MAL {mal_id}: {len(fetched_w)} "
                         f"uživatelů staženo a cachováno"
@@ -807,11 +884,12 @@ class AniListClient:
             batch_size = 50
             for i in range(0, len(missing_ids), batch_size):
                 chunk  = missing_ids[i:i + batch_size]
-                result = self._post(self.QUERY_USER_NAMES, {"ids": chunk})
-                for u in ((result or {}).get("data", {}).get("Page", {})
-                          .get("users", [])):
-                    if u.get("id") and u.get("name"):
-                        user_names[u["id"]] = u["name"]
+                result = self._request(self.QUERY_USER_NAMES, {"ids": chunk})
+                if result.ok:
+                    for u in (result.data.get("data", {}).get("Page", {})
+                              .get("users", [])):
+                        if u.get("id") and u.get("name"):
+                            user_names[u["id"]] = u["name"]
             log.debug(f"user-CF: doplněno {len(missing_ids)} jmen")
 
         if not user_profile:
@@ -871,8 +949,8 @@ class AniListClient:
 
         if not candidates:
             best = max(len(p) for p in user_profile.values())
-            print(f"  user-CF: nikdo nesplnil min_overlap={min_overlap} "
-                  f"(max překryv: {best}) – zkus snížit min_overlap")
+            status(f"  user-CF: nikdo nesplnil min_overlap={min_overlap} "
+                   f"(max překryv: {best}) – zkus snížit min_overlap")
             log.info(f"user-CF: max překryv {best} < min_overlap {min_overlap}")
             return []
 
@@ -880,8 +958,8 @@ class AniListClient:
         similar_users = [uid for uid, _ in candidates[:top_users]]
         sim_by_uid    = dict(candidates[:top_users])
 
-        print(f"  user-CF: {len(similar_users)} podobných uživatelů "
-              f"(z {len(user_profile)} kandidátů), stahuji jejich seznamy ...")
+        status(f"  user-CF: {len(similar_users)} podobných uživatelů "
+               f"(z {len(user_profile)} kandidátů), stahuji jejich seznamy ...")
 
         # 5. Stáhni listy podobných uživatelů.
         #    Diferenciální agregace:
@@ -920,25 +998,37 @@ class AniListClient:
             cached_ul = self._cf_load(ck)
             if cached_ul is not None:
                 # Cache hit — [fmt, [[mid, raw, avg_raw, title], ...]]
-                print(f"  user-CF: seznam [{j+1}/{m}] z cache", end="\r")
+                progress(f"  user-CF: seznam [{j+1}/{m}] z cache")
                 _fmt, raw_entries = cached_ul[0], cached_ul[1]
                 _ul_cache_hits += 1
             else:
                 # Cache miss — stáhni a zpracuj
-                print(f"  user-CF: stahuji seznam [{j+1}/{m}] ...", end="\r")
-                result     = self._post(self.QUERY_USER_ANIMELIST, {"userId": uid})
-                if result is None:
-                    # _post selhal — NEUKLÁDÁME, tento uživatel se vynechá
-                    # v tomto běhu, ale příští spuštění to zkusí znovu
-                    # (cache zůstává prázdná = cache miss).
+                progress(f"  user-CF: stahuji seznam [{j+1}/{m}] ...")
+                result     = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})
+                if not result.ok:
                     _ul_failed += 1
-                    log.warning(
-                        f"user-CF userlist uid={uid} ({name}): request "
-                        f"selhal, cache nezměněna, uživatel vynechán"
-                    )
+                    if result.permanent:
+                        # 400/404/422/GraphQL chyba (např. neplatné userId,
+                        # smazaný účet) -- retry se stejným uid nikdy neuspěje,
+                        # takže je bezpečné zacachovat "žádná data" natrvalo.
+                        self._cf_save(ck, ["UNKNOWN", []])
+                        log.info(
+                            f"user-CF userlist uid={uid} ({name}): request "
+                            f"selhal natrvalo (400/404/422/GraphQL) -- "
+                            f"cachuju jako prázdný, uživatel vynechán"
+                        )
+                    else:
+                        # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) —
+                        # NEUKLÁDÁME, tento uživatel se vynechá v tomto běhu,
+                        # ale příští spuštění to zkusí znovu (cache zůstává
+                        # prázdná = cache miss).
+                        log.warning(
+                            f"user-CF userlist uid={uid} ({name}): request "
+                            f"dočasně selhal, cache nezměněna, uživatel vynechán"
+                        )
                     continue
                 _ul_fetched += 1
-                collection = (result.get("data") or {}).get("MediaListCollection") or {}
+                collection = (result.data.get("data") or {}).get("MediaListCollection") or {}
                 _fmt       = (
                     (collection.get("user") or {})
                     .get("mediaListOptions", {})
@@ -987,7 +1077,7 @@ class AniListClient:
                 comm_norm[mid] = c_norm
                 rater_list[mid].append((sim, name))
 
-        print(f"  user-CF: stahuji seznamy [{m}/{m}] ... hotovo            ")
+        progress_done(f"  user-CF: stahuji seznamy [{m}/{m}] ... hotovo")
         log.info(
             f"user-CF userlist: {_ul_cache_hits} z cache, "
             f"{_ul_fetched} staženo, {_ul_failed} selhalo "

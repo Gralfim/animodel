@@ -4,6 +4,7 @@ cli.py — Orchestrace celého běhu.
   python -m animodel --export animelist.xml [--config config.yaml] [--out output]
   python -m animodel --export animelist.xml --no-recommend     # jen model
   python -m animodel --export animelist.xml --no-anilist       # jen Jikan
+  python -m animodel --export animelist.xml --analyze          # jen přehled franšíz
 
 Jediný vstup = MAL XML export. Žádný ruční mezikrok: stáhne metadata, postaví
 model, vygeneruje model.html a recommendations.html.
@@ -11,6 +12,7 @@ model, vygeneruje model.html a recommendations.html.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 
@@ -64,6 +66,16 @@ def run(args) -> int:
     print(f"      {len(entries)} záznamů · {len(completed)} ohodnocených · "
           f"{len(by_status.get('Plan to Watch', []))} PTW")
 
+    if args.analyze:
+        from .series import print_series_groups
+        enr = Enricher(cfg)
+        # print_series_groups potřebuje jen Jikan data (relations), ne AniList --
+        # cachované z předchozích běhů, takže tohle typicky nic nestahuje naživo
+        jdata = enr.jikan.get_anime_batch([e.mal_id for e in completed], show_progress=True)
+        titles_map = {mid: (j or {}).get("title", str(mid)) for mid, j in jdata.items()}
+        print_series_groups(completed, jdata, titles_map)
+        return 0
+
     print(f"[2/5] Stahuju metadata (Jikan{' + AniList' if cfg.enrich.use_anilist else ''}) …")
     enr = Enricher(cfg)
     titles = enr.build_titles(completed, show_progress=True)
@@ -76,10 +88,15 @@ def run(args) -> int:
         interaction_min_count=cfg.model.interaction_min_count,
         interaction_min_lift=cfg.model.interaction_min_lift,
     )
-    model.fit(titles)
-    model._fit_clusters(cfg.model.n_clusters)
+    model.fit(titles, n_clusters=cfg.model.n_clusters)
     print(f"      β={model.beta:+.2f} · CV RMSE {model.cv_rmse:.3f} "
           f"(baseline {model.baseline_rmse:.3f}) · {len(model.clusters)} nálad")
+
+    unmatched = model.unmatched_intensity_keywords()
+    if unmatched["heavy"] or unmatched["light"]:
+        print(f"      [pozn.] osa náročnosti: klíče bez shody v datech — "
+              f"heavy={unmatched['heavy'] or '—'}, light={unmatched['light'] or '—'} "
+              f"(nemusí být chyba, ale stojí za kontrolu proti list_all_tags())")
 
     stats = _build_stats(model, by_status, titles)
     model_html = os.path.join(cfg.out_dir, "model.html")
@@ -167,9 +184,28 @@ def main(argv=None) -> int:
     p.add_argument("--no-anilist", action="store_true", help="použij jen Jikan/MAL")
     p.add_argument("--no-recommend", action="store_true", help="jen model, bez doporučení")
     p.add_argument("--user-cf", action="store_true", help="zapni user-based CF (pomalé)")
+    p.add_argument("--analyze", action="store_true",
+                   help="vypiš přehled nalezených franšízových skupin a skonči "
+                        "(print_series_groups byla v kódu, ale bez cesty ven z CLI)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="ukaž i běžné retry/rate-limit hlášky (INFO), ne jen "
+                        "skutečné chyby -- default je jen WARNING a výš, ať "
+                        "log neutopí progress v routinních 429 retry zprávách")
     args = p.parse_args(argv)
     if not args.export:
         p.error("chybí --export (cesta k MAL XML exportu)")
+
+    # Bez tohohle žádný handler nikdy nebyl explicitně nastavený -- Python
+    # spadl na `logging.lastResort`, který ukazuje jen WARNING+ BEZ formátu
+    # (žádné "WARNING:", žádný čas, jen holá zpráva) -- warningy tak vypadaly
+    # identicky jako běžný print() text, jen se navíc chovaly jinak
+    # (stderr, nebufferované) než progress výpisy (stdout, bufferované), což
+    # dělalo dojem, že log je plný "chyb" a progress info chybí.
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s [%(name)s] %(message)s",
+        stream=sys.stderr,
+    )
     return run(args)
 
 

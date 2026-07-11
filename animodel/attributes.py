@@ -57,8 +57,14 @@ ALIAS: dict[str, str] = {
 # Pořadí priority při slučování (dřívější vyhraje při kolizi labelu).
 CATEGORY_PRIORITY = [
     "genre", "demographic", "source", "format", "decade",
-    "theme", "tag", "studio",
+    "theme", "tag", "studio", "director", "writer",
 ]
+
+# Sdíleno s jikan.py::list_all_staff (dřív duplikováno na dvou místech --
+# canonicalizace pozic patří sem, k ostatní logice atributů, ne do API klienta).
+DIRECTOR_POSITIONS = {"director", "series director"}
+WRITER_POSITIONS = {"script", "series composition", "screenplay",
+                    "original creator", "original story"}
 
 
 def resolve_alias(key: str) -> str:
@@ -101,6 +107,7 @@ def build_attributes(
     *,
     anilist_min_rank: int = 0,
     include_studios: bool = True,
+    staff: list[dict] | None = None,
 ) -> dict[str, AttrValue]:
     """
     Sestaví kanonický slovník atributů pro jedno anime ze zdrojů Jikan + AniList.
@@ -108,6 +115,10 @@ def build_attributes(
     Args:
         jikan:   data z Jikan /anime/{id}/full (nebo None)
         anilist: data z AniList Media (nebo None)
+        staff:   data z Jikan /anime/{id}/staff (nebo None) -- viz
+                 JikanClient.get_anime_staff. Volitelné a vypnuté defaultně
+                 (EnrichCfg.include_staff), protože stojí extra API volání
+                 navíc k /full pro každý titul.
     """
     out: dict[str, AttrValue] = {}
 
@@ -149,6 +160,27 @@ def build_attributes(
             asrc = (anilist.get("source") or "").strip()
             if asrc:
                 _add(out, asrc.replace("_", " ").title(), "source", 1.0)
+
+    # ── Staff (režie / scénář) ─────────────────────────────────────
+    # Samostatná kategorie na osobu+roli (ne jen na osobu), protože dobrý
+    # režisér nemusí být dobrý scenárista a naopak -- "líbí se mi všechno od
+    # X jako scenáristy" a "od X jako režiséra" jsou dva různé signály, i
+    # když jde o tutéž osobu. Vyloučeno z mood-klastrování (taste.py filtruje
+    # na genre/theme/tag/demographic) -- preference tvůrce není nálada.
+    if staff:
+        seen_directors, seen_writers = set(), set()
+        for entry in staff:
+            person = entry.get("person") or {}
+            name = (person.get("name") or "").strip()
+            if not name:
+                continue
+            positions = {p.lower() for p in (entry.get("positions") or [])}
+            if positions & DIRECTOR_POSITIONS and name not in seen_directors:
+                _add(out, f"Director: {name}", "director", 1.0)
+                seen_directors.add(name)
+            if positions & WRITER_POSITIONS and name not in seen_writers:
+                _add(out, f"Writer: {name}", "writer", 1.0)
+                seen_writers.add(name)
 
     return out
 

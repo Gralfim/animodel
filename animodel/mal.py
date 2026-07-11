@@ -1,5 +1,5 @@
 """
-mal_parser.py — Parser XML exportu z MyAnimeList
+mal.py — Parser XML exportu z MyAnimeList
 
 Jak exportovat: https://myanimelist.net/panel.php?go=export
 """
@@ -45,7 +45,7 @@ def parse_export(path: str) -> tuple[list[MalEntry], dict]:
     for node in root.findall("anime"):
         d = {t.tag: (t.text or "").strip() for t in node}
         entries.append(MalEntry(
-            mal_id=int(d.get("series_animedb_id", 0)),
+            mal_id=int(d.get("series_animedb_id") or 0),
             title=d.get("series_title", ""),
             type=d.get("series_type", ""),
             episodes=int(d.get("series_episodes") or 0),
