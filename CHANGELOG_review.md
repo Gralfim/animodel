@@ -46,6 +46,50 @@ progress průběžně (díky flush), stderr defaultně jen skutečnou chybu.
 
 ---
 
+## 9. "Private User" 404 — odfiltrovat co nejdřív, bez ztráty místa
+
+Nejdřív k té první možnosti z otázky (jiný způsob, jak získat seznam
+soukromého uživatele): není. Ověřil jsem si to přímo proti AniListově
+dokumentaci -- OAuth2 je potřeba přesně pro čtení privátních seznamů,
+a bez autorizace jako TEN konkrétní uživatel se k datům nedá dostat.
+Nejde o mezeru, kterou by šlo obejít, je to schválně takhle -- takže jsem
+se držel jen druhé možnosti (časnější odfiltrování).
+
+**Ověřil jsem i to, jestli AniList nabízí nějaké pole jako `isPrivate`,
+podle kterého by šlo poznat soukromý profil PŘED pokusem o stažení seznamu**
+-- stáhl jsem si celou referenci `User` typu (`docs.anilist.co/reference/object/user`)
+a nic takového tam není. Zjistí se to jedině pokusem.
+
+Daná fakta (žádná predikce, jen pokus) znamenají, že nejlepší dostupná
+oprava je: (1) **nevyřazovat kandidáty na `top_users` HNED při výběru** --
+`similar_users_recommendations` teď drží celý seřazený pool a prochází ho
+POSTUPNĚ, dokud nenajde `top_users` POUŽITELNÝCH (ne jen zkusených) --
+soukromý/smazaný účet se přeskočí a jde se na dalšího kandidáta, místo aby
+natrvalo sebral slot; (2) **využít cache mezi běhy** -- už existující
+`_cf_save(ck, ["UNKNOWN", []])` pro permanentní selhání teď funguje jako
+plnohodnotný filtr: na PŘÍŠTÍM běhu se tenhle uid ani nezkusí, cache-check
+na začátku smyčky ho přeskočí bez jediného requestu.
+
+Nový parametr `scan_budget_factor` (default 3.0) je pojistka proti
+neomezenému skenování, kdyby byl podíl soukromých účtů extrémně vysoký --
+`max_attempts = top_users * scan_budget_factor`. Když se dosáhne stropu a
+nenasbíralo se dost použitelných uživatelů, zaloguje se o tom jasná
+zpráva s návrhem zvýšit `scan_budget_factor`.
+
+Cestou jsem opravil i zavádějící log zprávu (`_ul_failed` počítalo
+permanentní i dočasná selhání dohromady, ale text hlásil jen "dočasně") --
+teď jsou to dva oddělené počitadla (`_ul_failed_transient` vs.
+`_ul_skipped_empty`).
+
+Ověřeno na skutečné `similar_users_recommendations()` se dvěma scénáři:
+(a) 8 soukromých před 4 reálnými (schválně nejhorší pořadí) -- ukázalo
+mimo jiné, že `scan_budget_factor=3.0` může být v extrémních případech
+málo, proto je teď nastavitelný; (b) 6 soukromých a 6 reálných prokládaně
+(realističtější) -- `top_users=5` správně našlo přesně 5 použitelných po
+proskenování 10 z 12 kandidátů, bez ztráty jediného slotu.
+
+---
+
 ## 8. Refaktor na `Result` typ — nahrazuje mutable side-channel
 
 Popsal jsi to přesně: `_last_failure_kind` byl fragilní vzor (mutable stav

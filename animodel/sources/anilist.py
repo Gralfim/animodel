@@ -665,6 +665,7 @@ class AniListClient:
         seed_count: int = 25,
         users_per_seed: int = 100,
         user_scores: dict[int, float] | None = None,
+        scan_budget_factor: float = 3.0,
     ) -> list[dict]:
         """
         User-based collaborative filtering přes AniList.
@@ -688,14 +689,28 @@ class AniListClient:
 
           4) Stahují se i CUSTOM listy (jinak by se ztratily skryté entries).
 
+          5) SOUKROMÉ/SMAZANÉ ÚČTY se přeskočí BEZ ztráty místa v top_users.
+             AniList User typ nemá žádné queryovatelné "isPrivate" pole
+             (ověřeno proti schématu) -- pozná se to až při pokusu o
+             MediaListCollection, typicky jako 404 "Private User". Kandidáti
+             se proto neořezávají na top_users hned při výběru, ale prochází
+             se CELÝ seřazený pool, dokud se nenajde top_users POUŽITELNÝCH
+             (=s reálnými daty). `scan_budget_factor` je pojistka proti
+             neomezenému skenování, kdyby byl podíl soukromých profilů
+             extrémně vysoký.
+
         Parametry:
             liked_mal_ids   — tvoje oblíbené (seedy bereme z méně populárních)
             min_overlap     — minimální počet sdílených seedů (tvrdý práh)
-            top_users       — kolik nejpodobnějších uživatelů použít
+            top_users       — kolik POUŽITELNÝCH (ne jen zkusených) uživatelů chceš
             seed_count      — kolik nejméně populárních seedů použít
             users_per_seed  — kolik uživatelů stáhnout na jeden seed
             user_scores     — {mal_id: tvé_score} pro kosinovou podobnost
                               (volitelné; bez něj se použije jen vážený překryv)
+            scan_budget_factor — kolikrát víc kandidátů (než top_users) zkusit
+                              projít, než se to vzdá s tím, co se sehnalo.
+                              Default 3.0 -- zvyš, pokud log hlásí "dosaženo
+                              stropu" a máš na to trpělivost (víc požadavků).
 
         Vrátí list[dict] {'mal_id', 'score'}. Best-effort.
         """
@@ -955,11 +970,18 @@ class AniListClient:
             return []
 
         candidates.sort(key=lambda x: -x[1])
-        similar_users = [uid for uid, _ in candidates[:top_users]]
-        sim_by_uid    = dict(candidates[:top_users])
+        # Neořezávej na top_users HNED -- ponech celý seřazený pool. Soukromé
+        # profily ("Private User" 404) se pozná až při pokusu o stažení
+        # seznamu, ne dřív (AniList User typ nemá žádné isPrivate pole, co by
+        # šlo zjistit predem -- ověřeno proti schématu). Když by se
+        # ořezávalo hned tady, soukromý uživatel by natrvalo sebral jedno
+        # z `top_users` míst a výsledek by měl systematicky méně reálných
+        # přispěvatelů, než kolik jsi žádal.
+        sim_by_uid = dict(candidates)
 
-        status(f"  user-CF: {len(similar_users)} podobných uživatelů "
-               f"(z {len(user_profile)} kandidátů), stahuji jejich seznamy ...")
+        status(f"  user-CF: {len(candidates)} kandidátů nad min_overlap, "
+               f"cílím na {top_users} použitelných (soukromé/smazané se "
+               f"přeskočí bez ztráty místa)…")
 
         # 5. Stáhni listy podobných uživatelů.
         #    Diferenciální agregace:
@@ -986,42 +1008,64 @@ class AniListClient:
             "POINT_3":          3.0,
         }
 
-        m = len(similar_users)
-        _ul_cache_hits   = 0
-        _ul_fetched      = 0
-        _ul_failed       = 0
-        for j, uid in enumerate(similar_users):
-            sim  = max(0.0, sim_by_uid.get(uid, 0.0))
+        m = len(candidates)
+        # Neskenuj neomezeně dlouho do pool -- pojistka pro patologický případ
+        # (např. 80 % kandidátů soukromých by jinak mohlo projít celý pool).
+        max_attempts = min(m, max(top_users, int(top_users * scan_budget_factor)))
+
+        _ul_cache_hits     = 0
+        _ul_fetched        = 0
+        _ul_failed_transient = 0   # síť/5xx/timeout -- zkusí se znovu příště
+        _ul_skipped_empty  = 0     # bez použitelných dat (privátní/smazaní/prázdní) -- z cache NEBO čerstvě zjištěno
+        good_users = 0
+        j = 0
+        while good_users < top_users and j < max_attempts:
+            uid, sim_val = candidates[j]
+            j += 1
+            sim  = max(0.0, sim_val)
             name = user_names.get(uid, str(uid))
             ck   = f"userlist_{uid}"
 
             cached_ul = self._cf_load(ck)
             if cached_ul is not None:
                 # Cache hit — [fmt, [[mid, raw, avg_raw, title], ...]]
-                progress(f"  user-CF: seznam [{j+1}/{m}] z cache")
                 _fmt, raw_entries = cached_ul[0], cached_ul[1]
                 _ul_cache_hits += 1
+                if not raw_entries:
+                    # Známo z minula: soukromý/smazaný/natrvalo selhaný
+                    # účet. NEpřičítej se do good_users -- jde se rovnou na
+                    # dalšího kandidáta, ať tenhle mrtvý slot nepřijde nazmar.
+                    _ul_skipped_empty += 1
+                    progress(f"  user-CF: [{j}/{max_attempts}] {name} přeskočen (známo: bez dat)")
+                    continue
+                progress(f"  user-CF: seznam [{j}/{max_attempts}] z cache")
             else:
                 # Cache miss — stáhni a zpracuj
-                progress(f"  user-CF: stahuji seznam [{j+1}/{m}] ...")
-                result     = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})
+                progress(f"  user-CF: stahuji seznam [{j}/{max_attempts}] ...")
+                result = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})
                 if not result.ok:
-                    _ul_failed += 1
                     if result.permanent:
-                        # 400/404/422/GraphQL chyba (např. neplatné userId,
-                        # smazaný účet) -- retry se stejným uid nikdy neuspěje,
-                        # takže je bezpečné zacachovat "žádná data" natrvalo.
+                        # 400/404/422/GraphQL chyba -- typicky "Private
+                        # User" (404), neplatné userId nebo smazaný účet.
+                        # Retry se stejným uid nikdy neuspěje, takže je
+                        # bezpečné zacachovat "žádná data" natrvalo. Na
+                        # PŘÍŠTÍM běhu tenhle uid nikdy ani nezavolá síť --
+                        # cache-check výš (`cached_ul is not None`) ho
+                        # rovnou přeskočí.
                         self._cf_save(ck, ["UNKNOWN", []])
+                        _ul_skipped_empty += 1
                         log.info(
                             f"user-CF userlist uid={uid} ({name}): request "
-                            f"selhal natrvalo (400/404/422/GraphQL) -- "
-                            f"cachuju jako prázdný, uživatel vynechán"
+                            f"selhal natrvalo (pravděpodobně privátní/smazaný "
+                            f"účet) -- cachuju jako prázdný, přeskočeno bez "
+                            f"ztráty místa v top_users"
                         )
                     else:
                         # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) —
                         # NEUKLÁDÁME, tento uživatel se vynechá v tomto běhu,
                         # ale příští spuštění to zkusí znovu (cache zůstává
                         # prázdná = cache miss).
+                        _ul_failed_transient += 1
                         log.warning(
                             f"user-CF userlist uid={uid} ({name}): request "
                             f"dočasně selhal, cache nezměněna, uživatel vynechán"
@@ -1049,6 +1093,13 @@ class AniListClient:
                         if _mid and _avg_raw > 0:
                             raw_entries.append([_mid, _raw, _avg_raw, _title])
                 self._cf_save(ck, [_fmt, raw_entries])
+                if not raw_entries:
+                    # Úspěšný request, ale doopravdy nic použitelného (prázdný
+                    # seznam / nic ohodnoceného) -- taky nepočítat do good_users.
+                    _ul_skipped_empty += 1
+                    continue
+
+            good_users += 1
 
             # Zpracuj záznamy (z cache nebo čerstvě stažené)
             _div = _DIVISORS.get(_fmt)
@@ -1077,16 +1128,26 @@ class AniListClient:
                 comm_norm[mid] = c_norm
                 rater_list[mid].append((sim, name))
 
-        progress_done(f"  user-CF: stahuji seznamy [{m}/{m}] ... hotovo")
+        progress_done(f"  user-CF: {good_users}/{top_users} použitelných uživatelů "
+                      f"(prošel {j}/{max_attempts} kandidátů)")
         log.info(
             f"user-CF userlist: {_ul_cache_hits} z cache, "
-            f"{_ul_fetched} staženo, {_ul_failed} selhalo "
-            f"(z {m} podobných uživatelů)"
+            f"{_ul_fetched} staženo, {_ul_failed_transient} dočasně selhalo, "
+            f"{_ul_skipped_empty} bez dat (privátní/smazaní/prázdní) — "
+            f"{good_users} použitelných z {j} zkusených ({m} v poolu)"
         )
-        if _ul_failed:
+        if _ul_failed_transient:
             print(
-                f"  user-CF: {_ul_failed} uživatelů selhalo (viz log) "
+                f"  user-CF: {_ul_failed_transient} uživatelů dočasně selhalo (viz log) "
                 f"— zkusí se znovu při příštím spuštění"
+            )
+        if good_users < top_users and j >= max_attempts:
+            log.warning(
+                f"user-CF: dosaženo stropu {max_attempts} pokusů (scan_budget_factor="
+                f"{scan_budget_factor}) a získáno jen {good_users}/{top_users} "
+                f"použitelných uživatelů -- zvaž vyšší scan_budget_factor, "
+                f"min_overlap, nebo větší candidate pool (podíl bez dat: "
+                f"{_ul_skipped_empty}/{j})"
             )
 
         # 6. Finální CF skóre a filtrování.
@@ -1120,5 +1181,5 @@ class AniListClient:
 
         # Seřaď primárně dle cf_score
         out.sort(key=lambda x: -x["cf_score"])
-        log.info(f"user-CF: {len(out)} kandidátů z {len(similar_users)} uživatelů")
+        log.info(f"user-CF: {len(out)} kandidátů z {good_users} použitelných uživatelů")
         return out[:300]
