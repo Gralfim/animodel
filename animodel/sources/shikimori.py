@@ -29,83 +29,63 @@ se stavěla složitější (a další závislost přidávající) cesta přes ti
 search nebo přes animeApi jako prostředníka.
 """
 
-import json
 import time
 import logging
 from pathlib import Path
+from typing import Callable
+
 import requests
 
-from . import progress_done
+from . import progress, progress_done
+from .cache import FileCache, cached_fetch
+from .http import (
+    FixedRateLimiter, Attempt, attempt_success, attempt_permanent,
+    attempt_rate_limited, attempt_retryable, request_with_retry,
+)
 
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://shikimori.one/api"
 REQUEST_DELAY = 1.0             # konzervativní odhad, viz pozn. výš -- doladit
 RETRY_DELAYS = [2, 5, 10]
-MAX_RETRIES = 3
 
 
 class ShikimoriClient:
-    def __init__(self, cache_dir: str = "cache/shikimori", user_agent: str = "animodel"):
-        self.cache_path = Path(cache_dir)
-        self.cache_path.mkdir(parents=True, exist_ok=True)
+    def __init__(self, cache_dir: str = "cache/shikimori", user_agent: str = "animodel",
+                 sleep: Callable[[float], None] = time.sleep):
+        self._cache = FileCache(Path(cache_dir))
+        self._rate_limiter = FixedRateLimiter(REQUEST_DELAY)
+        self._sleep = sleep
         self.session = requests.Session()
         # Shikimori vyžaduje identifikovatelné User-Agent (potvrzeno napříč
         # více nezávislými wrapper knihovnami, co si to samy nastavují) --
         # bez něj riskuješ, že tě budou blokovat/omezovat přísněji.
         self.session.headers.update({"User-Agent": user_agent})
-        self._last_request = 0.0
 
-    def _wait(self):
-        elapsed = time.time() - self._last_request
-        if elapsed < REQUEST_DELAY:
-            time.sleep(REQUEST_DELAY - elapsed)
+    def _classify(self, resp: requests.Response, url: str) -> Attempt:
+        if resp.status_code == 404:
+            # Titul na Shikimori pod tímhle ID není -- typicky proto, že jde
+            # o jednu z výjimek ze zkratkového ID triku (viz docstring modulu).
+            return attempt_permanent(f"HTTP 404 {url}")
+        if resp.status_code == 429:
+            return attempt_rate_limited()
+        if not resp.ok:
+            return attempt_retryable(f"HTTP {resp.status_code} {url}")
+        return attempt_success(resp.json())
 
-    def _cache_file(self, key: str) -> Path:
-        return self.cache_path / f"{key.replace('/', '_')}.json"
+    def _request(self, endpoint: str):
+        url = f"{BASE_URL}/{endpoint}"
+        return request_with_retry(
+            perform=lambda: self.session.get(url, timeout=15),
+            classify=lambda resp: self._classify(resp, url),
+            rate_limiter=self._rate_limiter,
+            retry_delays=RETRY_DELAYS,
+            label="Shikimori",
+            sleep=self._sleep,
+        )
 
     def _get(self, endpoint: str):
-        ck = self._cache_file(endpoint)
-        if ck.exists():
-            cached = json.loads(ck.read_text(encoding="utf-8"))
-            return cached["data"] if cached.get("_found", True) else None
-
-        url = f"{BASE_URL}/{endpoint}"
-        for attempt in range(len(RETRY_DELAYS) + 1):
-            self._wait()
-            try:
-                resp = self.session.get(url, timeout=15)
-                self._last_request = time.time()
-
-                if resp.status_code == 404:
-                    # Titul na Shikimori pod tímhle ID není -- typicky proto,
-                    # že jde o jednu z výjimek ze zkratkového ID triku (viz
-                    # docstring modulu). INFO ne WARNING: očekávaný, běžný jev.
-                    ck.write_text(json.dumps({"_found": False}), encoding="utf-8")
-                    log.info(f"Shikimori 404 (mimo zkratkové ID pravidlo?): {endpoint}")
-                    return None
-
-                if resp.status_code == 429:
-                    wait = RETRY_DELAYS[attempt] if attempt < len(RETRY_DELAYS) else 30
-                    log.info(f"Shikimori rate limit 429, čekám {wait}s…")
-                    time.sleep(wait)
-                    continue
-
-                resp.raise_for_status()
-                data = resp.json()
-                ck.write_text(json.dumps({"_found": True, "data": data}, ensure_ascii=False),
-                             encoding="utf-8")
-                return data
-
-            except requests.RequestException as e:
-                if attempt < len(RETRY_DELAYS) - 1:
-                    log.warning(f"Shikimori chyba {e}, retry za {RETRY_DELAYS[attempt]}s…")
-                    time.sleep(RETRY_DELAYS[attempt])
-                else:
-                    log.error(f"Shikimori selhalo po {MAX_RETRIES} pokusech: {url}")
-                    return None
-        log.error(f"Shikimori selhalo po {MAX_RETRIES} pokusech (rate limit): {url}")
-        return None
+        return cached_fetch(self._cache, endpoint, lambda: self._request(endpoint))
 
     def get_similar(self, mal_id: int) -> list[dict]:
         """
@@ -143,7 +123,6 @@ class ShikimoriClient:
         for i, mid in enumerate(mal_ids):
             out[mid] = self.get_similar(mid)
             if show_progress and i % 5 == 0:
-                from . import progress
                 progress(f"  Shikimori podobná anime: {i}/{total}…")
         if show_progress:
             progress_done(f"  Shikimori podobná anime: hotovo ({total} seedů).")

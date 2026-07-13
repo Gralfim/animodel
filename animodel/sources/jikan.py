@@ -6,132 +6,71 @@ Dokumentace: https://docs.api.jikan.moe/
 Rate limit: ~3 requesty/sekundu (klient automaticky čeká)
 """
 
-import json
 import time
 import logging
 from pathlib import Path
+from typing import Callable
+
 import requests
 
-from . import progress, progress_done, Result, is_permanent_status
+from . import progress, progress_done, is_permanent_status
+from .cache import FileCache, cached_fetch
+from .http import (
+    FixedRateLimiter, Attempt, attempt_success, attempt_permanent,
+    attempt_rate_limited, attempt_retryable, request_with_retry,
+)
 
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.jikan.moe/v4"
 REQUEST_DELAY = 0.4          # sekundy mezi requesty (bezpečný interval)
-MAX_RETRIES   = 4
-RETRY_DELAYS  = [2, 5, 10, 30]  # exponenciální backoff při 429
+RETRY_DELAYS = [2, 5, 10, 30]  # exponenciální backoff; 429 = len()+1 pokusů,
+                                # ostatní dočasné chyby = len() pokusů (poslední
+                                # delay slouží jen jako 429 floor -- viz http.py)
 
 
 class JikanClient:
-    def __init__(self, cache_dir: str = "cache"):
-        self.cache_path = Path(cache_dir)
-        self.cache_path.mkdir(exist_ok=True)
-        self._last_request = 0.0
+    def __init__(self, cache_dir: str = "cache", sleep: Callable[[float], None] = time.sleep):
+        self._cache = FileCache(Path(cache_dir))
+        self._rate_limiter = FixedRateLimiter(REQUEST_DELAY)
+        self._sleep = sleep
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "anime-taste-model/1.0"
 
     # ── Interní helpers ────────────────────────────────────────────
 
-    def _cache_file(self, key: str) -> Path:
-        safe = key.replace("/", "_").replace("?", "_")
-        return self.cache_path / f"{safe}.json"
+    def _classify(self, resp: requests.Response, url: str) -> Attempt:
+        if resp.status_code == 404:
+            # Anime neexistuje nebo je NSFW — potvrzeně natrvalo.
+            return attempt_permanent(f"HTTP 404 {url}")
+        if resp.status_code == 429:
+            return attempt_rate_limited()
+        if is_permanent_status(resp.status_code):
+            # 400/422 -- request samotný je špatně (neplatné ID apod.),
+            # retry se stejnou URL by dopadl stejně.
+            return attempt_permanent(f"HTTP {resp.status_code} {url}")
+        if not resp.ok:
+            # Typicky 5xx -- zkusit znovu má smysl.
+            return attempt_retryable(f"HTTP {resp.status_code} {url}")
+        return attempt_success(resp.json())
 
-    def _load_cache(self, key: str):
-        f = self._cache_file(key)
-        if f.exists():
-            return json.loads(f.read_text(encoding="utf-8"))
-        return None
-
-    def _save_cache(self, key: str, data) -> None:
-        f = self._cache_file(key)
-        f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _request(self, endpoint: str) -> Result:
-        """
-        Čistě síťová vrstva -- BEZ cache. Vrací Result(ok, data, permanent).
-        Cachováním se zabývá výhradně _get() níž, tohle je jediné, co dělá
-        request samotný, takže se dá i samostatně testovat/mockovat.
-        """
-        elapsed = time.time() - self._last_request
-        if elapsed < REQUEST_DELAY:
-            time.sleep(REQUEST_DELAY - elapsed)
-
+    def _request(self, endpoint: str):
+        """Čistě síťová vrstva -- BEZ cache. Vrací Result(ok, data, permanent)."""
         url = f"{BASE_URL}/{endpoint}"
-        for attempt in range(len(RETRY_DELAYS) + 1):
-            try:
-                resp = self.session.get(url, timeout=15)
-                self._last_request = time.time()
+        return request_with_retry(
+            perform=lambda: self.session.get(url, timeout=15),
+            classify=lambda resp: self._classify(resp, url),
+            rate_limiter=self._rate_limiter,
+            retry_delays=RETRY_DELAYS,
+            label="Jikan",
+            sleep=self._sleep,
+        )
 
-                if resp.status_code == 429:
-                    wait = RETRY_DELAYS[attempt] if attempt < len(RETRY_DELAYS) else 60
-                    # INFO, ne WARNING: běžný, očekávaný jev u rate-limitovaného
-                    # API, co se vyřeší samo -- teprve VYČERPÁNÍ pokusů (níž)
-                    # je něco, co má smysl vypíchnout jako warning/error.
-                    log.info(f"Rate limit 429, čekám {wait}s…")
-                    time.sleep(wait)
-                    continue
-
-                if resp.status_code == 404:
-                    # Anime neexistuje nebo je NSFW — potvrzeně natrvalo.
-                    return Result.failure(permanent=True)
-
-                if is_permanent_status(resp.status_code):
-                    # 400/422 -- request samotný je špatně (neplatné ID
-                    # apod.), retry se stejnou URL by dopadl stejně. Vzdej
-                    # se hned, neplýtvej celým 2+5+10+30s retry schedulem.
-                    log.warning(f"Jikan natrvalo selhal (nebude se opakovat): "
-                                f"HTTP {resp.status_code} {url}")
-                    return Result.failure(permanent=True)
-
-                resp.raise_for_status()
-                return Result.success(resp.json())
-
-            except requests.RequestException as e:
-                # Sem se dostaneme jen pro kódy MIMO is_permanent_status
-                # (ty jsou zachyceny výš, ještě před raise_for_status) --
-                # typicky 5xx, nebo čistě síťová chyba bez odpovědi vůbec.
-                if attempt < len(RETRY_DELAYS) - 1:
-                    log.warning(f"Chyba {e}, retry za {RETRY_DELAYS[attempt]}s…")
-                    time.sleep(RETRY_DELAYS[attempt])
-                else:
-                    log.error(f"Selhalo po {MAX_RETRIES} pokusech: {url}")
-                    return Result.failure(permanent=False)
-
-        # Sem se dřív dalo dojít tiše (opakované 429 vyčerpaly všechny pokusy
-        # bez jediného log.error) -- na rozdíl od větve se síťovou výjimkou
-        # výš, která error loguje vždy. Titul, co se opakovaně rate-limitoval,
-        # tak potichu zmizel z výsledků beze stopy proč.
-        log.error(f"Selhalo po {MAX_RETRIES} pokusech (rate limit): {url}")
-        return Result.failure(permanent=False)
-
-    def _get(self, endpoint: str) -> dict:
-        """
-        Cache-aware wrapper kolem _request() -- JEDINÉ místo v JikanClient,
-        které rozhoduje o zápisu do cache (dřív se to řešilo uvnitř
-        _get() samotného na 3 různých místech; teď je to jedna zřetelná
-        if/elif/else větev tady dole).
-        """
-        cached = self._load_cache(endpoint)
-        if cached is not None:
-            return cached
-
-        result = self._request(endpoint)
-
-        if result.ok:
-            self._save_cache(endpoint, result.data)
-            return result.data
-
-        if result.permanent:
-            # 400/404/422 -- retry by stejně nikdy neuspěl, bezpečné
-            # zacachovat "nenalezeno" natrvalo.
-            self._save_cache(endpoint, None)
-            log.info(f"Jikan {endpoint}: selhalo natrvalo -- cachuju jako nenalezeno")
-            return None
-
-        # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) -- NEUKLÁDÁME,
-        # ať to příští běh zkusí znovu.
-        log.warning(f"Jikan {endpoint}: dočasné selhání, cache beze změny")
-        return None
+    def _get(self, endpoint: str):
+        """Cache-aware wrapper kolem `_request()` přes sdílený `cached_fetch`
+        primitiv -- jedno místo, které rozhoduje o zápisu do cache pro
+        VŠECHNY klienty v sources/, ne tři nezávislé kopie stejné logiky."""
+        return cached_fetch(self._cache, endpoint, lambda: self._request(endpoint))
 
     # ── Veřejné metody ─────────────────────────────────────────────
 
@@ -155,7 +94,7 @@ class JikanClient:
         Vrací list objektů:
             [{"person": {"mal_id": ..., "name": ...}, "positions": [...]}, ...]
 
-        Cachováno odděleně od /full dat pod klíčem "staff_{mal_id}".
+        Cachováno odděleně od /full dat pod klíčem "anime/{id}/staff".
         """
         result = self._get(f"anime/{mal_id}/staff")
         if result and "data" in result:
@@ -211,7 +150,7 @@ class JikanClient:
             if not data.get("pagination", {}).get("has_next_page"):
                 break
             page += 1
-            time.sleep(REQUEST_DELAY)
+            self._sleep(REQUEST_DELAY)
 
         return results
 

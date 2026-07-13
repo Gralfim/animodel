@@ -23,14 +23,22 @@ Výstup najdeš v `output/`. MAL export stáhneš na
 
 ```bash
 python -m animodel -e animelist.xml -c config.yaml   # vlastní ladění
+python -m animodel -e animelist.xml -o vystup         # jiná výstupní složka (default: output)
+python -m animodel -e animelist.xml --cache muj_cache # jiná cache složka (default: cache)
 python -m animodel -e animelist.xml --no-recommend   # jen model
 python -m animodel -e animelist.xml --no-anilist     # jen MAL/Jikan
 python -m animodel -e animelist.xml --shrinkage 12   # konzervativnější efekty
 python -m animodel -e animelist.xml --user-cf        # + user-based CF (pomalé)
+python -m animodel -e animelist.xml --analyze        # jen přehled franšízových skupin, bez modelu
+python -m animodel -e animelist.xml --verbose        # + rutinní retry/rate-limit hlášky (INFO)
 ```
 
+Kompletní přehled: `python -m animodel --help`.
+
 První běh je pomalejší (stahuje metadata přes Jikan a AniList); vše se cachuje
-do `cache/`, takže další běhy jsou rychlé.
+do `cache/`, takže další běhy jsou rychlé. Default log level je WARNING (jen
+skutečné problémy); `--verbose` přidá INFO úroveň s běžnými retry/rate-limit
+zprávami, které jinak nejsou vidět.
 
 ---
 
@@ -78,8 +86,10 @@ desetidílná série nepřeválcovala model.
 Dvě nezávislé větve, sjednocené a deduplikované:
 
 - **Atributová / obsahová** — z tvých oblíbených seedů se tahá MAL + AniList
-  „recommendations" graf (item-based CF) a navíc discovery přes AniList tag-search
-  na tvé nejcharakterističtější tagy.
+  „recommendations" graf (item-based CF), volitelně i Shikimori `/similar`
+  (`enrich.use_shikimori` v configu, default vypnuto — naživo neověřený tvar
+  odpovědi), a navíc discovery přes AniList tag-search na tvé
+  nejcharakterističtější tagy.
 - **Collaborative / uživatelská** (volitelná, `--user-cf`) — uživatelé s podobným
   vkusem a jejich vysoko hodnocené tituly.
 
@@ -116,6 +126,11 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |
 | `recommend.high_score` | od jaké známky je titul „seed" |
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |
+| `enrich.include_staff` | signál po režisérech/scenáristech (+1 Jikan volání/titul, default vypnuto) |
+| `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (naživo neověřeno, default vypnuto) |
+| `recommend.use_user_cf*` | user-based CF přes AniList a jeho ladění (viz `--user-cf`, dražší/pomalejší) |
+
+Plný seznam parametrů (včetně výchozích hodnot) je v `config.example.yaml`.
 
 ---
 
@@ -125,8 +140,12 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 animodel/
   mal.py            parser MAL XML exportu
   sources/
+    __init__.py     sdílené utility (progress výpisy, Result typ pro úspěch/selhání)
+    cache.py        sdílený cache primitiv (FileCache, cached_fetch) -- 1 klíč = 1 soubor
+    http.py         sdílený retry/backoff driver (request_with_retry, rate limitery)
     jikan.py        MAL data + recommendations + search (přes Jikan)
-    anilist.py      AniList tagy + recommendations + tag-search
+    anilist.py      AniList tagy + recommendations + tag-search + user-based CF
+    shikimori.py    volitelný zdroj "podobných anime" (/similar), default vypnuto
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
@@ -135,6 +154,7 @@ animodel/
   report.py         HTML prezentace (model + doporučení)
   config.py         laditelné parametry (žádné seznamy atributů)
   cli.py            orchestrace: python -m animodel
+tests/              pytest sada nad sources/ (cache, retry/backoff, klienti) -- viz níž
 ```
 
 Programové použití:
@@ -147,10 +167,37 @@ cfg = Config()
 entries, userinfo = parse_export("animelist.xml")
 completed = [e for e in split_by_status(entries)["Completed"] if e.score]
 titles = Enricher(cfg).build_titles(completed)
-model = TasteModel(shrinkage_k=cfg.model.shrinkage_k).fit(titles)
+model = TasteModel(
+    shrinkage_k=cfg.model.shrinkage_k,
+    min_attr_count=cfg.model.min_attr_count,
+    interaction_min_count=cfg.model.interaction_min_count,
+    interaction_min_lift=cfg.model.interaction_min_lift,
+).fit(titles, n_clusters=cfg.model.n_clusters)
 for e in model.top_effects(15, sign=1):
     print(e.label, round(e.effect, 2))
 ```
+
+---
+
+## Testování
+
+Síťová/cache vrstva (`animodel/sources/`) má pytest sadu, která běží čistě
+offline (žádné skutečné HTTP volání, žádné čekání na retry/backoff):
+
+```bash
+pip install -e ".[dev]"   # nebo jen: pip install pytest
+pytest -q
+```
+
+Testy pokrývají cache sémantiku (úspěch/trvalé/dočasné selhání — kdy se smí a
+nesmí zapsat cache záznam), sdílenou retry/backoff smyčku a per-klientské
+chování (Jikan, AniList včetně stránkovaného user-based CF, Shikimori) nad
+mockovaným `requests.Session`.
+
+`animodel_test_harness.py` (v rootu, mimo `tests/`) je samostatný ad-hoc
+skript, který ověřuje `taste.py` na ručně tagovaných datech
+(`franchise_tags.py`) bez sítě — spouští se přímo (`python
+animodel_test_harness.py`), ne přes pytest.
 
 ---
 
