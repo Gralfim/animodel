@@ -38,8 +38,11 @@ recommend:
   max_seeds: 40
   seeds_per_franchise: 2    # max. seedů z jedné franšízy (0 = bez limitu)
   w_taste_fit: 1.0          # váha shody s atributy/náladami
-  w_cf: 1.0                 # váha „doporučili to tvé oblíbené"
+  w_cf: 0.8                 # váha grafu podobnosti („doporučili to tvé oblíbené")
+  w_user_cf: 0.6            # váha user-based CF (podobní uživatelé) — vlastní složka
   w_quality: 0.3            # mírná preference vyššího MAL skóre
+  min_mal_rec_votes: 5      # ignoruj MAL doporučení s méně hlasy (šum)
+  min_anilist_rec_rating: 3 # ignoruj AniList doporučení se slabším ratingem
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
   top_n: 40
   use_user_cf: false        # user-based CF přes AniList (pomalé)

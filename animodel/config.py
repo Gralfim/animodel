@@ -59,10 +59,19 @@ class RecommendCfg:
                                       # hodnocené řady vyhrávají); 0 = bez limitu.
                                       # Bez něj pětiřadá oblíbená franšíza sebere
                                       # 5 slotů a hlasuje 5x skoro stejným rec grafem.
-    # váhy kompozitního skóre pro řazení doporučení (z-skóry se sčítají)
+    # váhy kompozitního skóre pro řazení doporučení (z-skóry se sčítají).
+    # Item-CF (graf podobnosti) a user-CF jsou ODDĚLENÉ složky s vlastním
+    # z-skóre -- dřív sdílely jeden kbelík a šikmé rozdělení hlasů grafu
+    # user-CF utopilo a přebilo i model vkusu (změřeno 2026-07: |příspěvek|
+    # 6.4 vs 1.6; hlasy grafu se navíc před z-skórem tlumí log1p).
     w_taste_fit: float = 1.0          # shoda s mými afinitními efekty + klastry
-    w_cf: float = 1.0                 # collaborative signál (rec. graf / podobní uživatelé)
+    w_cf: float = 0.8                 # graf podobnosti (MAL/AniList/Shikimori)
+    w_user_cf: float = 0.6            # user-based CF (podobní uživatelé)
     w_quality: float = 0.3            # mírná preference vyššího komunitního skóre
+    # prahy minimální síly hrany v grafu podobnosti -- slabé hrany (jednotky
+    # hlasů, automatická doporučení) jsou spíš šum než skutečná podobnost
+    min_mal_rec_votes: int = 5        # MAL: min. počet uživatelských hlasů
+    min_anilist_rec_rating: int = 3   # AniList: min. čistý rating doporučení
     min_community: float = 6.5        # nedoporučuj pod tímto komunitním skóre
     top_n: int = 40                   # kolik doporučení ve globálním přehledu
     top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu

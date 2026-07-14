@@ -147,13 +147,20 @@ Dvě nezávislé větve, sjednocené a deduplikované:
 - **Collaborative / uživatelská** (volitelná, `--user-cf`) — uživatelé s podobným
   vkusem a jejich vysoko hodnocené tituly.
 
-Každý kandidát se skóruje kompozitem (sčítají se z-skóry):
+Každý kandidát se skóruje kompozitem (sčítají se z-skóry čtyř oddělených
+složek):
 
 ```
 composite = w_taste_fit · afinita+shoda_s_náladou
-          + w_cf        · „doporučili to tvé oblíbené"
+          + w_cf        · „doporučili to tvé oblíbené" (graf, log-tlumené hlasy)
+          + w_user_cf   · user-based CF (podobní uživatelé)
           + w_quality   · komunitní skóre
 ```
+
+Graf podobnosti a user-CF mají **každý vlastní z-skóre a váhu** — ve sdíleném
+kbelíku by šikmé rozdělení hlasů grafu user-CF utopilo a přebilo i model vkusu.
+Slabé hrany grafu (`min_mal_rec_votes`, `min_anilist_rec_rating`) se zahazují:
+jednotky hlasů jsou šum, skutečně podobné série mívají hlasů desítky.
 
 Řadí se podle kompozitu, **ne** podle predikované známky (ta se kvůli restrikci
 rozsahu lepí na komunitní průměr a nerozlišuje). Predikovaná známka + interval se
@@ -180,7 +187,8 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
 | `model.interaction_triples` | experiment: synergie trojic nad jádry nálad |
 | `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
-| `recommend.w_taste_fit / w_cf / w_quality` | váhy řazení doporučení |
+| `recommend.w_taste_fit / w_cf / w_user_cf / w_quality` | váhy 4 složek řazení doporučení |
+| `recommend.min_mal_rec_votes / min_anilist_rec_rating` | prahy síly hrany v grafu podobnosti |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |
 | `recommend.high_score` | od jaké známky je titul „seed" |
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |

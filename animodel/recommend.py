@@ -13,14 +13,20 @@ Strategie (dvě nezávislé větve, sjednocené a deduplikované):
      - najdi uživatele s podobným vkusem a jejich vysoko hodnocené tituly
      - (drahé přes AniList; zapíná se recommend.use_user_cf=True)
 
-Skórování každého kandidáta:
+Skórování každého kandidáta (4 oddělené složky):
     composite = w_taste_fit * z(taste_fit)
-              + w_cf        * z(cf_signal)
+              + w_cf        * z(log1p(item_votes))
+              + w_user_cf   * z(user_votes)
               + w_quality   * z(community)
   kde
-    taste_fit  = model predikuje afinitu (rezid. část) + shoda s nejbližším klastrem
-    cf_signal  = kolik seedů ho doporučilo + jejich hlasy/rating (graf-based CF)
-    community  = komunitní skóre (mírná preference kvality)
+    taste_fit   = model predikuje afinitu (rezid. část) + shoda s nejbližším klastrem
+    item_votes  = kolik seedů ho doporučilo + jejich hlasy/rating (graf podobnosti);
+                  log1p tlumí šikmé rozdělení, jinak z-skóre outlierů přebije zbytek
+    user_votes  = skóre z user-based CF (podobní uživatelé) -- vlastní složka,
+                  ve sdíleném kbelíku s grafem se dřív utopilo
+    community   = komunitní skóre (mírná preference kvality)
+  Slabé hrany grafu (pod min_mal_rec_votes / min_anilist_rec_rating) se
+  zahazují už při sběru -- jednotky hlasů jsou šum, ne podobnost.
 
 Řadíme podle composite, NE podle predikované známky (ta se lepí na komunitní
 průměr kvůli restrikci rozsahu — viz metodika). Predikovaná známka + interval
@@ -52,7 +58,7 @@ class Recommendation:
     pred_lo: float
     pred_hi: float
     taste_fit: float
-    cf_signal: float
+    cf_signal: float         # hlasy z grafu podobnosti (item-CF, po prazích)
     composite: float
     ptw: bool
     cluster_name: str
@@ -60,6 +66,7 @@ class Recommendation:
     cf_seeds: list           # názvy seedů, které tenhle titul "doporučily"
     synopsis: str = ""
     sources: list = field(default_factory=list)   # ['MAL-rec', 'AniList-rec', 'tag-search']
+    user_cf_signal: float = 0.0   # skóre z user-based CF (oddělená složka)
 
 
 def _z(values: list[float]) -> dict:
@@ -110,15 +117,20 @@ class Recommender:
     def _gather_candidates(self, titles: list[Title], seen_ids: set[int]):
         """
         Vrátí:
-            cand_meta: {mal_id: {'cf_votes': float, 'cf_seeds': [titul,...], 'sources': set}}
+            cand_meta: {mal_id: {'item_votes': float, 'user_votes': float,
+                                 'cf_seeds': [titul,...], 'sources': set}}
+
+        item_votes = graf podobnosti (MAL/AniList/Shikimori), user_votes =
+        user-based CF -- oddělené kbelíky, každý dostane vlastní z-skóre.
         """
         cand: dict[int, dict] = {}
 
         def bump(mid, votes, seed_title, source):
             if mid in seen_ids:
                 return
-            d = cand.setdefault(mid, {"cf_votes": 0.0, "cf_seeds": [], "sources": set()})
-            d["cf_votes"] += votes
+            d = cand.setdefault(mid, {"item_votes": 0.0, "user_votes": 0.0,
+                                      "cf_seeds": [], "sources": set()})
+            d["user_votes" if source == "user-CF" else "item_votes"] += votes
             if seed_title and seed_title not in d["cf_seeds"]:
                 d["cf_seeds"].append(seed_title)
             d["sources"].add(source)
@@ -175,14 +187,20 @@ class Recommender:
                     )
             return result
 
-        # A1) item-based CF graf z MAL + AniList + Shikimori recommendations
+        # A1) item-based CF graf z MAL + AniList + Shikimori recommendations.
+        # Slabé hrany (pod min_*_rec prahy) se zahazují ještě před ořezem na
+        # candidates_per_seed -- jednotky hlasů / záporný rating jsou šum,
+        # skutečně podobné série mívají desítky hlasů (empirie uživatele
+        # potvrzená rozdělením: ~12 % AniList hran má rating 1-2).
         for s in seeds:
             # Jikan může být vypnutý (--no-jikan, nouzový AniList-only režim)
             if self.enr.jikan:
                 recs = call_source("MAL-rec", lambda s=s: self.enr.jikan.get_recommendations(s.mal_id))
                 # candidates_per_seed byl definovaný v configu, ale nikde se
                 # nečetl -- změna hodnoty v config.yaml neměla žádný efekt.
-                for r in recs[: self.rc.candidates_per_seed]:
+                strong = [r for r in recs
+                          if r.get("votes", 0) >= self.rc.min_mal_rec_votes]
+                for r in strong[: self.rc.candidates_per_seed]:
                     # váž hlasy podle toho, jak moc seed miluju (user_score nad průměr)
                     w = max(0.1, s.user_score - self.model.u_mean + 1.0)
                     bump(r["mal_id"], (1 + math.log1p(r.get("votes", 0))) * w,
@@ -190,7 +208,9 @@ class Recommender:
 
             if self.enr.anilist:
                 recs = call_source("AniList-rec", lambda s=s: self.enr.anilist.get_recommendations(s.mal_id))
-                for r in recs[: self.rc.candidates_per_seed]:
+                strong = [r for r in recs
+                          if r.get("rating", 0) >= self.rc.min_anilist_rec_rating]
+                for r in strong[: self.rc.candidates_per_seed]:
                     w = max(0.1, s.user_score - self.model.u_mean + 1.0)
                     bump(r["mal_id"], (1 + math.log1p(max(0, r.get("rating", 0)))) * w,
                          seed_title_by_id.get(s.mal_id), "AniList-rec")
@@ -324,20 +344,25 @@ class Recommender:
         if not rows:
             return []
 
-        # 4) z-skóry pro kompozit
+        # 4) z-skóry pro kompozit -- item-CF přes log1p (šikmé rozdělení:
+        # kandidát doporučený mnoha seedy najednou by jinak dostal z-skóre
+        # 5-15 a přebil všechny ostatní složky, viz analýza 2026-07)
         z_taste = _z([r[7] for r in rows])
-        z_cf = _z([r[2]["cf_votes"] for r in rows])
+        z_item = _z([math.log1p(r[2]["item_votes"]) for r in rows])
+        z_user = _z([r[2]["user_votes"] for r in rows])
         z_q = _z([(r[1].community or self.model.c_mean) for r in rows])
 
         recs = []
         for (mid, en, meta, pred, lo, hi, contribs, taste_fit, cname) in rows:
             comp = (self.rc.w_taste_fit * z_taste(taste_fit)
-                    + self.rc.w_cf * z_cf(meta["cf_votes"])
+                    + self.rc.w_cf * z_item(math.log1p(meta["item_votes"]))
+                    + self.rc.w_user_cf * z_user(meta["user_votes"])
                     + self.rc.w_quality * z_q(en.community or self.model.c_mean))
             recs.append(Recommendation(
                 mal_id=mid, title=en.title, title_en=en.title_en,
                 community=en.community, pred=pred, pred_lo=lo, pred_hi=hi,
-                taste_fit=taste_fit, cf_signal=meta["cf_votes"], composite=comp,
+                taste_fit=taste_fit, cf_signal=meta["item_votes"],
+                user_cf_signal=meta["user_votes"], composite=comp,
                 ptw=(mid in ptw_ids), cluster_name=cname,
                 why=contribs[:6], cf_seeds=meta["cf_seeds"][:5],
                 synopsis=en.synopsis, sources=sorted(meta["sources"]),

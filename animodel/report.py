@@ -130,6 +130,7 @@ tr:last-child td{{border-bottom:none}}
 .flag{{display:inline-block;font-size:11px;padding:3px 10px;border-radius:6px;
   background:rgba(232,163,61,.16);color:var(--acc);font-family:'Spline Sans Mono',monospace;
   letter-spacing:.05em;margin-left:8px;vertical-align:middle}}
+.flag.seen{{background:rgba(236,228,214,.10);color:var(--mut)}}
 .src{{font-family:'Spline Sans Mono',monospace;font-size:11px;color:var(--mut)}}
 footer{{margin-top:80px;padding-top:20px;border-top:1px solid rgba(236,228,214,.1);
   color:var(--mut);font-size:12.5px;font-family:'Spline Sans Mono',monospace}}
@@ -358,6 +359,15 @@ def _rec_card(r, rank: int) -> str:
     comm = f'{r.community:.2f}' if r.community is not None else '—'
     syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
     src = " · ".join(_esc(s) for s in r.sources)
+    # oddělené CF signály (viz recommend.py: 4složkový kompozit) -- ukázat,
+    # jen když jsou nenulové, ať karty bez daného zdroje nemají prázdné nuly
+    cf_boxes = ""
+    if r.cf_signal:
+        cf_boxes += (f'<div class="s"><div class="n">{r.cf_signal:.0f}</div>'
+                     f'<div class="k">graf podobnosti</div></div>')
+    if getattr(r, "user_cf_signal", 0.0):
+        cf_boxes += (f'<div class="s"><div class="n">{r.user_cf_signal:.1f}</div>'
+                     f'<div class="k">user-CF</div></div>')
     return (
         f'<div class="rec"><div class="rank">{rank:02d}</div>'
         f'<div class="t">{_esc(r.title)}{flag}</div>'
@@ -366,6 +376,7 @@ def _rec_card(r, rank: int) -> str:
         f'<div class="s"><div class="n pos">{r.pred:.1f}</div>'
         f'<div class="k">tvůj odhad ({r.pred_lo:.1f}–{r.pred_hi:.1f})</div></div>'
         f'<div class="s"><div class="n">{comm}</div><div class="k">MAL score</div></div>'
+        f'{cf_boxes}'
         f'</div>'
         f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
         f'{seeds}'
@@ -536,7 +547,7 @@ def render_cluster_recommendations_html(
     return out_path
 
 
-def _cf_rec_card(r_cf: dict, enr, rank: int) -> str:
+def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
     """Karta CF doporučeni. Kombinuje enr (Recommendation) a r_cf (raw CF dict)."""
     mid       = r_cf.get("mal_id")
     cf_score  = r_cf.get("cf_score", 0.0)
@@ -552,7 +563,15 @@ def _cf_rec_card(r_cf: dict, enr, rank: int) -> str:
         title_en = ""
     ten  = f' \xb7 <span class="ten">{title_en}</span>' if title_en else ""
     ptw  = enr.ptw if enr else False
-    flag = '<span class="flag">na tve\u0301m PTW</span>' if ptw else ""
+    # CF report je surov\u00fd pohled: shl\u00e9dnut\u00e9 tituly se z n\u011bj nefiltruj\u00ed
+    # (potvrzuj\u00ed shodu vkusu se sp\u0159\u00edzn\u011bn\u00fdmi du\u0161emi), jen se ozna\u010d\u00ed --
+    # do fin\u00e1ln\u00edch \u017eeb\u0159\u00ed\u010dk\u016f se na rozd\u00edl odsud nikdy nedostanou.
+    if watched:
+        flag = '<span class="flag seen">u\u017e shl\u00e9dnuto</span>'
+    elif ptw:
+        flag = '<span class="flag">na tve\u0301m PTW</span>'
+    else:
+        flag = ""
     mal_url = f"https://myanimelist.net/anime/{mid}" if mid else "#"
 
     # Skore sekce
@@ -642,6 +661,7 @@ def render_cf_recommendations_html(
     out_path: str,
     userinfo: dict = None,
     enr_data: dict = None,
+    watched_ids: set = None,
 ) -> str:
     """Standalone HTML report pro vysledky user-based CF, karta-style."""
     parts = [_head("CF doporu\u010den\xed \u2014 animodel")]
@@ -652,12 +672,15 @@ def render_cf_recommendations_html(
         f'{len(cf_recs)} titul\u016f nalezen\xfdch p\u0159es podobn\xe9 u\u017eivatele na AniList. '
         f'CF sk\xf3re\xa0=\xa0pr\u016fm\u011br komunity\xa0+\xa0v\xe1\u017een\xe1 odchylka sp\u0159\xedn\u011bn\xfdch du\u0161\xed. '
         f'Kladn\xe1\xa0\u0394\xa0=\xa0sp\u0159\xedn\u011bn\xe9 du\u0161e hodnotow\xed v\xfd\u0161 ne\u017e komunita. '
-        f'Se\u0159azeno sestupn\u011b dle CF sk\xf3re.</p>'
+        f'Se\u0159azeno sestupn\u011b dle CF sk\xf3re. Na rozd\xedl od fin\xe1ln\xedch '
+        f'\u017eeb\u0159\xed\u010dk\u016f se tu shl\xe9dnut\xe9 tituly nefiltruj\xed, jen '
+        f'ozna\u010duj\xed \u0161t\xedtkem \u2014 potvrzuj\xed shodu vkusu.</p>'
     )
+    watched = watched_ids or set()
     for i, r_cf in enumerate(cf_recs, 1):
         mid = r_cf.get("mal_id")
         enr = (enr_data or {}).get(mid)
-        parts.append(_cf_rec_card(r_cf, enr, i))
+        parts.append(_cf_rec_card(r_cf, enr, i, watched=mid in watched))
     parts.append(_foot())
     out = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as f:

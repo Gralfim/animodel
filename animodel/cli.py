@@ -216,7 +216,8 @@ def run(args) -> int:
                 r["title"]    = al_titles[mid]
                 r["title_en"] = al_titles_en.get(mid, "")
 
-        report.render_cf_recommendations_html(cf_recs, cf_html, userinfo, enr_data)
+        report.render_cf_recommendations_html(cf_recs, cf_html, userinfo, enr_data,
+                                              watched_ids=watched_ids)
         print(f"      → {cf_html}  ({len(cf_recs)} CF titulů)")
     elif cfg.recommend.use_user_cf:
         print("      [CF report přeskočen — žádné výsledky]")
