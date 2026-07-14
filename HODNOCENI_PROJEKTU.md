@@ -262,7 +262,7 @@ konsolidovaný přehled, co čeká na rozhodnutí:
 
 | Co | Kde | Stav |
 |---|---|---|
-| `aggregate_entries` (kolaps franšíze na 1 záznam) | `series.py:130` | funkční, ale **nenapojené** — konkuruje aktivní `1/√k` váze v `enrich.py`. Rozhodnutí (zachovat jako `--aggregate-mode` alternativu, nebo smazat) čeká na tebe. |
+| `aggregate_entries` (kolaps franšíze na 1 záznam) | `series.py:130` | ~~funkční, ale nenapojené~~ **SMAZÁNO (2026-07-14)** po diskuzi — vážený přístup vyhrál (zachovává vnitro-franšízový signál, degraduje elegantně). Zároveň doplněno: `side_story_weight` (OVA/speciály tišeji), váhy propsané do klastrování, `seeds_per_franchise` limit. |
 | Shikimori `/similar` | `sources/shikimori.py` | výchozí vypnuto — tvar odpovědi (rank vs. holý seznam) není ověřený naživo, `REQUEST_DELAY=1.0` je odhad. |
 | `include_staff` (režie/scénář jako signál) | `config.py` | funkční, výchozí vypnuto (cena: +1 Jikan volání/titul). |
 | Cache bez expirace | `sources/*.py` | **žádný TTL ani `--refresh-cache` flag** — jednou stažené `averageScore`/`popularity`/tagy zůstávají v cache navždy, i když se použije nástroj opakovaně za měsíce. U aktuálně vysílaných sérií (kde se komunitní skóre rychle mění) to může tiše zkreslovat `w_quality` a `min_community` filtr. Není zdokumentované jako záměr, spíš chybějící funkce. |
@@ -314,6 +314,12 @@ odpovědnosti riskuje nechtěně zasáhnout ostatní — typicky přesně tam, k
 `CHANGELOG_review.md` už vznikly tři různé bugy (body 5, 6, 8, 9).
 
 ### 7.4 `side story` v defaultní množině slučovaných relací
+
+> **Stav (2026-07-14): ZMÍRNĚNO.** Side story/OVA/speciály se dál slučují
+> do franšízy, ale dostávají snížený příspěvek (`model.side_story_weight`,
+> default 0.5) — tonálně odlišný vedlejšák už nedostane stejnou váhu jako
+> hlavní řada. Detekce: formát (OVA/Special/TV Special/Music) nebo
+> parent-story vazba. Viz `enrich.py::_is_side_content`.
 
 `series.py::SERIES_RELATION_TYPES` obsahuje `"side story"` s komentářem
 "volitelné — některé side story jsou samostatné", ale je zapnuté ve výchozí

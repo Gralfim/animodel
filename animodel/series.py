@@ -1,23 +1,24 @@
 """
-series_aggregator.py — Agregace sérií přes sequel/prequel vazby
+series.py — Seskupování franšíz přes sequel/prequel vazby
 
 Problém: MAL a Jikan vidí každou řadu série jako samostatný titul.
-Uživatel ale hodnotí sérii jako celek — a hodnocení jednotlivých řad
-koreluje silně navzájem (umělá inflace trénovacích dat).
+Hodnocení jednotlivých řad ale silně koreluje navzájem — bez korekce by
+oblíbená mnohadílná franšíza uměle nafoukla trénovací data.
 
-Řešení: Union-Find (disjoint-set) přes Sequel/Prequel vazby z Jikan.
-Každá connected component = jedna série → zachováme záznam s MAX skóre.
+Řešení: Union-Find (disjoint-set) přes Sequel/Prequel vazby.
+Každá connected component = jedna franšíza. Členové skupiny pak dostanou
+snížené váhy (enrich.py::build_titles: hlavní řady 1/√k_eff, vedlejší
+obsah ještě míň dle side_story_weight) -- každá řada zůstává samostatným
+datovým bodem s vlastní známkou i atributy, jen mluví tišeji.
 
-Příklad:
-  SAO S1 (score 9) + SAO S2 (score 7) + SAO Alicization (score 9)
-  → jedna série s max skóre 9, příznaky z S1 (jako zástupce)
-
-Zástupce série = entry s nejvyšším skóre (tie-break: více epizod).
+(Dřívější alternativa `aggregate_entries` -- kolaps franšízy na jeden
+záznam s MAX skóre a atributy zástupce -- byla odstraněna 2026-07:
+zahazovala vnitro-franšízový signál (řady hodnocené různě), párovala
+max(známky) s komunitním skóre jiné řady a byla křehká vůči chybnému
+seskupení. Vážený přístup degraduje elegantně.)
 """
 
 import logging
-from dataclasses import dataclass, field
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ SERIES_RELATION_TYPES = {
     "sequel",
     "prequel",
     "alternative version",
-    "side story",        # volitelné — některé side story jsou samostatné
+    "side story",        # spojuje do skupiny; vedlejšost řeší váhy (enrich.py)
 }
 
 # Typy vazeb které NESPOJUJEME (jiný příběh/vesmír)
@@ -125,112 +126,6 @@ def build_series_groups(
         f"({linked} vazeb), {singletons} standalone titulů"
     )
     return groups
-
-
-def aggregate_entries(
-    entries:    list,           # list[MalEntry]
-    jikan_data: dict,
-    relation_types: set[str] = SERIES_RELATION_TYPES,
-) -> list:
-    """
-    Kolapsuje trénovací záznamy na úrovni sérií.
-
-    Pro každou skupinu (sérii):
-      - score    = maximum přes všechny záznamy skupiny
-      - zástupce = záznam s nejvyšším skóre (tie-break: více epizod)
-        → příznaky se počítají z dat zástupce
-
-    Vrací nový list MalEntry záznamů (jeden per série/standalone).
-
-    POZN. (code review, 2026): tahle funkce se nikde nevolá -- enrich.py
-    aktivně používá jiný přístup (váha 1/√k na každého člena franšízy místo
-    kolapsu na jeden reprezentativní záznam, viz Enricher.build_titles).
-    Rozbitý import teď opravuju, protože si nejsem jistý, jestli byl tenhle
-    přístup záměrně nahrazen tím váhovým, nebo je to jen rozpracovaná
-    alternativa -- ale NEnapojuju to do pipeline, protože mít aktivně obě
-    najednou (kolaps i váhu) by dalo dvě si konkurující franšízová řešení.
-    Necháváš na svém uvážení, jestli tuhle funkci chceš (a k čemu přesně --
-    např. jako alternativní --aggregate-mode přepínač), nebo smazat.
-    """
-    from .mal import MalEntry
-
-    mal_ids   = [e.mal_id for e in entries]
-    entry_map = {e.mal_id: e for e in entries}
-
-    groups = build_series_groups(mal_ids, jikan_data)
-
-    aggregated = []
-    for root, members in groups.items():
-        if len(members) == 1:
-            aggregated.append(entry_map[members[0]])
-            continue
-
-        # Najdi zástupce: nejvyšší skóre, tie-break: více epizod
-        group_entries = [entry_map[m] for m in members if m in entry_map]
-        if not group_entries:
-            continue
-
-        max_score    = max(e.score for e in group_entries)
-        # Zástupce = ten s nejvyšším skóre (a nejvíce epizodami při shodě)
-        representative = max(
-            group_entries,
-            key=lambda e: (e.score, e.episodes)
-        )
-
-        # Vytvoř agregovaný záznam se zachovanými daty zástupce
-        # ale score = maximum přes skupinu
-        agg = MalEntry(
-            mal_id=          representative.mal_id,
-            title=           _series_title(group_entries, jikan_data),
-            type=            representative.type,
-            episodes=        sum(e.episodes for e in group_entries),
-            watched_episodes=sum(e.watched_episodes for e in group_entries),
-            score=           max_score,
-            status=          representative.status,
-            start_date=      representative.start_date,
-            finish_date=     representative.finish_date,
-            rewatched=       representative.rewatched,
-        )
-        aggregated.append(agg)
-
-        titles = [e.title for e in group_entries]
-        log.debug(
-            f"Série [{', '.join(titles[:3])}{'…' if len(titles)>3 else ''}] "
-            f"→ score {[e.score for e in group_entries]} → max {max_score}"
-        )
-
-    before = len(entries)
-    after  = len(aggregated)
-    log.info(
-        f"Agregace sérií: {before} záznamů → {after} "
-        f"(redukce o {before-after}, tj. {(before-after)/before*100:.0f}%)"
-    )
-    return aggregated
-
-
-def _series_title(entries: list, jikan_data: dict) -> str:
-    """Sestaví popis série pro výpisy (např. 'SAO [4 řady]')."""
-    if len(entries) == 1:
-        return entries[0].title
-
-    # Najdi nejkratší společný prefix nebo použij první titul
-    titles = [e.title for e in entries]
-    base   = _common_prefix(titles)
-    if len(base) > 4:
-        return f"{base.rstrip(': ')} [{len(entries)} řady]"
-    return f"{titles[0]} [{len(entries)} řady]"
-
-
-def _common_prefix(strings: list[str]) -> str:
-    if not strings:
-        return ""
-    prefix = strings[0]
-    for s in strings[1:]:
-        while not s.startswith(prefix):
-            prefix = prefix[:-1]
-            if not prefix:
-                return ""
-    return prefix
 
 
 def print_series_groups(

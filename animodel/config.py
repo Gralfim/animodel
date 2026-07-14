@@ -18,6 +18,10 @@ class ModelCfg:
     interaction_min_lift: float = 0.30
     n_clusters: int | None = None     # None = automaticky podle siluety (4–7)
     aggregate_franchises: bool = True # sequel/prequel → jeden vážený datový bod
+    side_story_weight: float = 0.5    # příspěvek vedlejšího obsahu (OVA/speciál/
+                                      # side story) do franšízové váhy vs. 1.0
+                                      # hlavní řady; 1.0 = bez rozlišení,
+                                      # 0.0 = vedlejší obsah z modelu vyřadit
     intensity_lexicon: str = "intensity.yaml"  # osa náročnosti: generuj přes
                                       # --gen-intensity, hodnoty uprav ručně;
                                       # když soubor neexistuje, použije se
@@ -47,6 +51,10 @@ class RecommendCfg:
     high_score: float = 8.0           # od jaké známky brát titul jako "oblíbený" (seed)
     candidates_per_seed: int = 25     # kolik doporučení/podobných tahat na seed (Jikan/AniList)
     max_seeds: int = 40
+    seeds_per_franchise: int = 2      # max. seedů z jedné franšízy (nejlépe
+                                      # hodnocené řady vyhrávají); 0 = bez limitu.
+                                      # Bez něj pětiřadá oblíbená franšíza sebere
+                                      # 5 slotů a hlasuje 5x skoro stejným rec grafem.
     # váhy kompozitního skóre pro řazení doporučení (z-skóry se sčítají)
     w_taste_fit: float = 1.0          # shoda s mými afinitními efekty + klastry
     w_cf: float = 1.0                 # collaborative signál (rec. graf / podobní uživatelé)

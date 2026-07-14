@@ -83,9 +83,29 @@ class Recommender:
     # ── Kandidáti ────────────────────────────────────────────────────────────
 
     def _seeds(self, titles: list[Title]) -> list[Title]:
-        seeds = [t for t in titles if t.user_score >= self.rc.high_score]
-        seeds.sort(key=lambda t: -t.user_score)
-        return seeds[: self.rc.max_seeds]
+        """
+        Vysoce hodnocené tituly jako seedy, s limitem na franšízu
+        (`seeds_per_franchise`): bez něj pětiřadá oblíbená franšíza sebere
+        5 z max_seeds slotů a její (vzájemně skoro identické) rec grafy
+        hlasují 5x -- kandidáti podobní franšíze pak dostávají násobný CF
+        signál na úkor rozmanitosti. Nejlépe hodnocené řady mají přednost.
+        """
+        cand = [t for t in titles if t.user_score >= self.rc.high_score]
+        cand.sort(key=lambda t: -t.user_score)
+        cap = self.rc.seeds_per_franchise
+        if not cap:
+            return cand[: self.rc.max_seeds]
+        per_franchise: dict[int, int] = {}
+        seeds = []
+        for t in cand:
+            group = t.series_root if t.series_root is not None else t.mal_id
+            if per_franchise.get(group, 0) >= cap:
+                continue
+            per_franchise[group] = per_franchise.get(group, 0) + 1
+            seeds.append(t)
+            if len(seeds) >= self.rc.max_seeds:
+                break
+        return seeds
 
     def _gather_candidates(self, titles: list[Title], seen_ids: set[int]):
         """

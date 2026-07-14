@@ -69,7 +69,10 @@ class Title:
     user_score: float
     community: float | None
     attrs: dict[str, AttrValue]
-    weight: float = 1.0           # váha vzorku (např. 1/velikost_franšízy)
+    weight: float = 1.0           # váha vzorku (franšízové tlumení, viz enrich.py)
+    series_root: int | None = None  # kořen franšízové skupiny (union-find);
+                                    # None = standalone. recommend.py přes něj
+                                    # omezuje počet seedů na franšízu.
 
 
 @dataclass
@@ -423,6 +426,11 @@ class TasteModel:
             return
 
         X = normalize(np.array(rows), norm="l2")
+        # Franšízové váhy titulů (1/√k_eff apod., viz enrich.py) se propisují
+        # i sem -- bez sample_weight by desetiřadá franšíza byla 10 plnohodnotných
+        # bodů v prostoru nálad a táhla centroidy i velikosti klastrů, přestože
+        # ve zbytku modelu (baseline/efekty/interakce) už je tlumená.
+        w_all = np.array([t.weight for t in meta])
         if k is None:
             # vyber k podle siluety v rozsahu 4–7 (chceme interpretovatelné nálady)
             best_k, best_sil = 5, -1
@@ -430,8 +438,12 @@ class TasteModel:
             for kk in range(4, 8):
                 if kk >= len(rows):
                     continue
-                km = KMeans(n_clusters=kk, n_init=10, random_state=0).fit(X)
+                km = KMeans(n_clusters=kk, n_init=10, random_state=0).fit(
+                    X, sample_weight=w_all)
                 try:
+                    # silhouette_score sample_weight nepodporuje -- výběr k
+                    # zůstává nevážený (na tvar klastrů má váha vliv přes
+                    # KMeans fit výš, tady jde jen o skóre dělení)
                     sil = silhouette_score(X, km.labels_)
                 except Exception:
                     sil = -1
@@ -439,9 +451,9 @@ class TasteModel:
                     best_sil, best_k = sil, kk
             k = best_k
 
-        km = KMeans(n_clusters=k, n_init=10, random_state=0).fit(X)
+        km = KMeans(n_clusters=k, n_init=10, random_state=0).fit(X, sample_weight=w_all)
         labels = km.labels_
-        overall = X.mean(axis=0)
+        overall = np.average(X, axis=0, weights=w_all)
 
         clusters = []
         for c in range(k):
@@ -449,7 +461,8 @@ class TasteModel:
             if not members_i:
                 continue
             sub = X[members_i]
-            centroid = sub.mean(axis=0)
+            w_sub = w_all[members_i]
+            centroid = np.average(sub, axis=0, weights=w_sub)
             distinct = centroid - overall
             sig_idx = distinct.argsort()[::-1][:6]
             signature = []
@@ -470,8 +483,13 @@ class TasteModel:
             mem = sorted(
                 [(meta[i].mal_id, meta[i].title, meta[i].user_score) for i in members_i],
                 key=lambda x: -x[2])
-            mean_score = sum(m[2] for m in mem) / len(mem)
-            inten = sum(self.intensity_of(meta[i].attrs) for i in members_i) / len(members_i)
+            # průměrné skóre a intenzita klastru vážené franšízovými vahami --
+            # `size` zůstává prostý počet titulů (zobrazovací údaj)
+            w_tot = float(w_sub.sum())
+            mean_score = float(sum(w * meta[i].user_score
+                                   for w, i in zip(w_sub, members_i)) / w_tot)
+            inten = float(sum(w * self.intensity_of(meta[i].attrs)
+                              for w, i in zip(w_sub, members_i)) / w_tot)
             name = " / ".join(s[1] for s in signature[:3]) or f"Klastr {c+1}"
             clusters.append(Cluster(
                 idx=c, name=name, size=len(mem),

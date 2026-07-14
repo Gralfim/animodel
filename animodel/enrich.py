@@ -55,6 +55,42 @@ def _relations_from_anilist(media: dict | None) -> dict | None:
     return {"relations": rels} if rels else None
 
 
+# Formáty, které v rámci franšízy značí vedlejší obsah (OVA/speciály/hudební
+# klipy). ONA záměrně chybí -- plnohodnotné série dnes běžně vycházejí jako
+# ONA (streamovací platformy), není to signál vedlejšosti. Movie taky ne
+# (kinofilmy bývají plnohodnotná pokračování). Standalone titulů se tohle
+# netýká vůbec -- vedlejšost se vyhodnocuje jen uvnitř skupin k>1.
+SIDE_FORMATS = {"ova", "special", "tv special", "music"}
+
+
+def _is_side_content(e: "Enriched") -> bool:
+    """
+    Je titul VEDLEJŠÍ obsah své franšízy (side story / OVA / speciál)?
+
+    Dva nezávislé signály (stačí jeden):
+      1. formát: Jikan `type` / AniList `format` v SIDE_FORMATS,
+      2. relace: titul sám deklaruje rodiče -- Jikan "Parent story",
+         AniList edge PARENT (obě konvence: side story ukazuje na svůj
+         hlavní titul; hlavní titul má obrácený "Side story" edge).
+
+    Čte se přímo ze surových zdrojových dat (e.jikan/e.anilist), ne přes
+    relations adaptér -- ten mapuje jen typy potřebné pro SESKUPOVÁNÍ
+    (series.py) a parent-story vazby do seskupování záměrně nevstupují.
+    """
+    fmt = ((e.jikan or {}).get("type")
+           or (e.anilist or {}).get("format") or "")
+    if fmt.strip().lower().replace("_", " ") in SIDE_FORMATS:
+        return True
+    for rel in (e.jikan or {}).get("relations") or []:
+        if (rel.get("relation") or "").lower() == "parent story":
+            return True
+    for edge in ((e.anilist or {}).get("relations") or {}).get("edges") or []:
+        node = edge.get("node") or {}
+        if edge.get("relationType") == "PARENT" and node.get("type") == "ANIME":
+            return True
+    return False
+
+
 def _clean_anilist_description(text: str) -> str:
     """AniList description je HTML-ish (<br>, <i>, &amp;) a obsahuje
     ~!spoiler!~ bloky -- pro report potřebujeme čistý text bez spoilerů."""
@@ -155,20 +191,32 @@ class Enricher:
         enr = self.enrich_ids(ids, show_progress=show_progress)
 
         weight = {mid: 1.0 for mid in ids}
+        series_root: dict[int, int] = {}
         if self.cfg.model.aggregate_franchises:
             rel_data = self.relations_data(enr)
             # id_set = všechny obohacené tituly (ne jen ty s vlastními
             # relations) -- titul bez vazeb pořád může být cílem vazby
             # od jiného člena franšízy.
             groups = build_series_groups(list(enr.keys()), rel_data)
+            side_w = self.cfg.model.side_story_weight
             for root, members in groups.items():
-                k = len(members)
-                if k > 1:
-                    # každý člen franšízy dostane váhu 1/sqrt(k) → tlumí inflaci,
-                    # ale neztrácí úplně signál vícenásobně oblíbené série
-                    w = 1.0 / math.sqrt(k)
-                    for m in members:
-                        weight[m] = w
+                if len(members) <= 1:
+                    continue
+                # Příspěvek člena do franšízy: hlavní řada 1.0, vedlejší
+                # obsah (OVA/speciál/side story) side_story_weight. Finální
+                # váha = c_i / √k_eff, kde k_eff = Σ c_i. Když jsou všichni
+                # členové hlavní, dává to přesně původní 1/√k; vedlejší
+                # obsah mluví úměrně tišeji a zároveň méně zvyšuje k_eff
+                # (netrestá hlavní řady za existenci OVAček).
+                contrib = {
+                    m: (side_w if (m in enr and _is_side_content(enr[m])) else 1.0)
+                    for m in members
+                }
+                k_eff = sum(contrib.values())
+                norm = math.sqrt(k_eff) if k_eff > 0 else 1.0
+                for m in members:
+                    weight[m] = contrib[m] / norm
+                    series_root[m] = root
 
         titles = []
         for e in mal_entries:
@@ -179,5 +227,6 @@ class Enricher:
                 mal_id=e.mal_id, title=en.title,
                 user_score=float(e.score), community=en.community,
                 attrs=en.attrs, weight=weight.get(e.mal_id, 1.0),
+                series_root=series_root.get(e.mal_id),
             ))
         return titles

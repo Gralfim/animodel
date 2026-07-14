@@ -12,6 +12,8 @@ model:
   interaction_min_lift: 0.30
   n_clusters: null          # null = auto podle siluety (4–7); nebo napevno např. 5
   aggregate_franchises: true
+  side_story_weight: 0.5    # vliv vedlejšího obsahu franšízy (OVA/speciál/side
+                            # story) vs. hlavní řady; 1.0 = bez rozlišení
   intensity_lexicon: intensity.yaml  # osa náročnosti (-1 lehké … +1 těžké);
                             # vygeneruj: python -m animodel -e export.xml --gen-intensity
                             # a hodnoty uprav; bez souboru se použije vestavěný default
@@ -32,6 +34,7 @@ recommend:
   high_score: 8.0           # od jaké známky brát titul jako seed
   candidates_per_seed: 25
   max_seeds: 40
+  seeds_per_franchise: 2    # max. seedů z jedné franšízy (0 = bez limitu)
   w_taste_fit: 1.0          # váha shody s atributy/náladami
   w_cf: 1.0                 # váha „doporučili to tvé oblíbené"
   w_quality: 0.3            # mírná preference vyššího MAL skóre

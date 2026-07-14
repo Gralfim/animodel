@@ -91,8 +91,14 @@ animodel proto **necílí na známku, ale na odchylku**:
 studia, zdroj, dekáda, formát, demografie) se **objevují samy z dat**.
 `attributes.py` je kanonizuje a **dedupuje napříč zdroji** (MAL „Drama" a AniList
 tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát.
-Franšízy (sequel/prequel) se přes union-find slučují a váží `1/√k`, aby oblíbená
-desetidílná série nepřeválcovala model.
+Franšízy (sequel/prequel/side story) se přes union-find slučují a členové
+dostávají tlumené váhy: hlavní řady `1/√k_eff`, vedlejší obsah (OVA, speciály,
+side story — poznané podle formátu nebo parent-story vazby) ještě míň
+(`side_story_weight`, default poloviční příspěvek). Oblíbená desetidílná série
+tak nepřeválcuje model, ale její opakované potvrzení vkusu se neztratí. Váhy se
+propisují i do klastrování nálad; v doporučeních navíc platí limit
+`seeds_per_franchise` (default 2), ať jedna franšíza nehlasuje pěti skoro
+identickými rec grafy.
 
 ### Osa náročnosti: generovaný lexikon místo ručních seznamů
 
@@ -165,6 +171,8 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `model.shrinkage_k` | vyšší = konzervativnější (malé vzorky víc tlumeny) |
 | `model.n_clusters` | `null` = auto; nebo napevno počet nálad |
 | `model.intensity_lexicon` | cesta k intensity.yaml (osa náročnosti, viz `--gen-intensity`) |
+| `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
+| `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
 | `recommend.w_taste_fit / w_cf / w_quality` | váhy řazení doporučení |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |
 | `recommend.high_score` | od jaké známky je titul „seed" |
