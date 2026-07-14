@@ -15,6 +15,9 @@ import re
 import datetime as _dt
 from collections import defaultdict
 
+# Práh pro štítek lehké/náročné u nálad -- zobrazovací konvence, ne model.
+INTENSITY_BADGE = 0.20
+
 ACCENT = "#e8a33d"
 ACCENT2 = "#6db0a6"
 NEG = "#d2654f"
@@ -239,27 +242,53 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
     parts.append(_eff_table(pos, "Co tě táhne nahoru"))
     parts.append(_eff_table(neg, "Co tě táhne dolů"))
 
-    # interakce
-    if model.interactions:
-        parts.append('<h2>Kombinace, které dělají víc než součet</h2>')
-        parts.append('<p class="note">Dvojice atributů, kde tvá afinita převyšuje prostý '
-                     'součet jednotlivých efektů — tvé „sladké tečky".</p>')
-        parts.append('<div class="panel"><table><tr><th>kombinace</th><th>lift</th><th>n</th></tr>')
-        for it in sorted(model.interactions, key=lambda x: -x.lift)[:12]:
-            parts.append(f'<tr><td>{_esc(it.label)}</td>'
-                         f'<td class="mono pos">+{it.lift:.2f}</td>'
-                         f'<td class="mono" style="color:{MUT}">{it.n:.0f}</td></tr>')
-        parts.append('</table></div>')
+    # interakce (synergie dvojic/trojic) -- obě znaménka: model je obě počítá
+    # i používá v predikci/doporučeních, tak ať jsou obě i vidět
+    triples = getattr(model, "triples", [])
+    if model.interactions or triples:
+        parts.append('<h2>Synergie atributů</h2>')
+        parts.append('<p class="note">Kombinace, kde se tvá afinita liší od prostého součtu '
+                     'jednotlivých efektů (lift, po smrštění malých vzorků). Kladné = '
+                     '„sladké tečky", záporné = kombinace, které ti nesedí. Obojí vstupuje '
+                     'do predikce i řazení doporučení.</p>')
+
+        def _int_table(items, head):
+            rows = [f'<h3>{head}</h3><div class="panel"><table>'
+                    '<tr><th>kombinace</th><th>lift</th><th>n</th></tr>']
+            for it in items:
+                cls = "pos" if it.lift >= 0 else "neg"
+                spoil = ' class="spoiler-item"' if getattr(it, "spoiler", False) else ""
+                rows.append(f'<tr{spoil}><td>{_esc(it.label)}</td>'
+                            f'<td class="mono {cls}">{it.lift:+.2f}</td>'
+                            f'<td class="mono" style="color:{MUT}">{it.n:.0f}</td></tr>')
+            rows.append('</table></div>')
+            return "".join(rows)
+
+        pos_int = sorted((it for it in model.interactions if it.lift > 0),
+                         key=lambda x: -x.lift)[:12]
+        neg_int = sorted((it for it in model.interactions if it.lift < 0),
+                         key=lambda x: x.lift)[:12]
+        if pos_int:
+            parts.append(_int_table(pos_int, "Dělají víc než součet"))
+        if neg_int:
+            parts.append(_int_table(neg_int, "Nesedí si"))
+        if triples:
+            # hierarchický lift: zbytek NAD singly a páry (viz taste.py)
+            parts.append(_int_table(
+                sorted(triples, key=lambda x: -abs(x.lift))[:10],
+                "Trojice — jádra nálad (experiment)"))
 
     # klastry / nálady
     parts.append('<h2>Tvé nálady — mezi čím přepínáš</h2>')
     parts.append('<p class="note">Tituly seskupené podle atributového otisku. „Náročnost" '
                  'měří poměr těžkých (drama, psycho, tragédie) vs. lehkých (komedie, slice-of-life) '
-                 'prvků — to je ta osa „emocionální únavy".</p>')
+                 'prvků — to je ta osa „emocionální únavy". „Afinita" = o kolik tituly téhle '
+                 'nálady hodnotíš nad svůj baseline (komunita + tvůj posun) — synergický efekt '
+                 'celé nálady, ne jen součtu jejích atributů.</p>')
     for c in model.clusters:
-        if c.intensity > 0.25:
+        if c.intensity > INTENSITY_BADGE:
             pill = f'<span class="pill heavy">náročné · {c.intensity:+.2f}</span>'
-        elif c.intensity < -0.25:
+        elif c.intensity < -INTENSITY_BADGE:
             pill = f'<span class="pill light">lehké · {c.intensity:+.2f}</span>'
         else:
             pill = f'<span class="pill mix">smíšené · {c.intensity:+.2f}</span>'
@@ -269,7 +298,8 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         mem = " · ".join(_esc(m[1]) for m in c.members[:6])
         parts.append(
             f'<div class="cl"><div class="name">{_esc(c.name)}</div>'
-            f'<div class="meta">{c.size} titulů · průměr {c.mean_user_score:.1f} &nbsp; {pill}</div>'
+            f'<div class="meta">{c.size} titulů · průměr {c.mean_user_score:.1f} '
+            f'· afinita {c.affinity:+.2f} &nbsp; {pill}</div>'
             f'<div>{sig}</div>'
             f'<div class="note" style="margin-top:10px">{mem}</div></div>')
 
@@ -422,9 +452,9 @@ def render_cluster_recommendations_html(
         anchor = _anchor_id(name)
         meta = cluster_meta.get(name)
         if meta:
-            if meta.intensity > 0.25:
+            if meta.intensity > INTENSITY_BADGE:
                 badge = f' <span class="pill heavy" style="font-size:10px">náročné</span>'
-            elif meta.intensity < -0.25:
+            elif meta.intensity < -INTENSITY_BADGE:
                 badge = f' <span class="pill light" style="font-size:10px">lehké</span>'
             else:
                 badge = f' <span class="pill mix" style="font-size:10px">smíšené</span>'
@@ -450,9 +480,9 @@ def render_cluster_recommendations_html(
 
         # Hlavička klastru
         if meta:
-            if meta.intensity > 0.25:
+            if meta.intensity > INTENSITY_BADGE:
                 pill = f'<span class="pill heavy">náročné · {meta.intensity:+.2f}</span>'
-            elif meta.intensity < -0.25:
+            elif meta.intensity < -INTENSITY_BADGE:
                 pill = f'<span class="pill light">lehké · {meta.intensity:+.2f}</span>'
             else:
                 pill = f'<span class="pill mix">smíšené · {meta.intensity:+.2f}</span>'
@@ -463,6 +493,7 @@ def render_cluster_recommendations_html(
             meta_html = (
                 f'<div class="meta">'
                 f'{meta.size} titulů v modelu · průměr {meta.mean_user_score:.1f}'
+                f' · afinita {meta.affinity:+.2f}'
                 f' &nbsp; {pill}</div>'
                 f'<div style="margin:6px 0 4px">{sig}</div>'
             )

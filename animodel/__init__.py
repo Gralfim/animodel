@@ -7,13 +7,13 @@ Veřejné API:
     from animodel import report
 """
 from .config import Config, ModelCfg, EnrichCfg, RecommendCfg
-from .taste import TasteModel, Title, AttrEffect, Interaction, Cluster
+from .taste import TasteModel, Title, AttrEffect, Interaction, Triple, Cluster
 from .enrich import Enricher, Enriched
 from .recommend import Recommender, Recommendation
 
 __all__ = [
     "Config", "ModelCfg", "EnrichCfg", "RecommendCfg",
-    "TasteModel", "Title", "AttrEffect", "Interaction", "Cluster",
+    "TasteModel", "Title", "AttrEffect", "Interaction", "Triple", "Cluster",
     "Enricher", "Enriched", "Recommender", "Recommendation",
 ]
 __version__ = "1.0.0"

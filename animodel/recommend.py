@@ -261,11 +261,11 @@ class Recommender:
     # ── Skórování ──────────────────────────────────────────────────────────────
 
     def _cluster_fit(self, attrs: dict[str, AttrValue]) -> tuple[float, str]:
-        """Kosinová podobnost k nejbližšímu klastru × jeho průměrné hodnocení."""
+        """Kosinová podobnost k nejbližšímu klastru × jeho AFINITA."""
         if not self.model.clusters:
             return 0.0, ""
         present = set(attrs)
-        best_sim, best_name, best_score = 0.0, "", 0.0
+        best_sim, best_name, best_aff = 0.0, "", 0.0
         for c in self.model.clusters:
             # klíč je teď přímo v signature (viz taste.py::_fit_clusters) --
             # dřív se tady dělal lineární průchod přes VŠECHNY self.model.effects
@@ -279,9 +279,14 @@ class Recommender:
             inter = len(present & sig_keys)
             sim = inter / math.sqrt(len(sig_keys) * max(1, len(present)))
             if sim > best_sim:
-                best_sim, best_name, best_score = sim, c.name, c.mean_user_score
-        # váž podobnost tím, jak vysoko ten klastr hodnotím (nad globální průměr)
-        return best_sim * (best_score - self.model.u_mean + 1.0), best_name
+                best_sim, best_name, best_aff = sim, c.name, c.affinity
+        # Váž podobnost klastrovou AFINITOU (vážený průměr reziduí členů) --
+        # dřívější `mean_user_score − u_mean` používalo surovou známku, čímž
+        # znovu zanášelo komunitní kvalitu, kterou si model jinde pečlivě
+        # odečítá (klastr mainstreamových hitů vypadal "oblíbeněji", než
+        # odpovídalo skutečnému osobnímu vkladu). Tvar (aff + 1.0) zachovává
+        # původní strukturu: neutrální klastr přispívá ~1×, oblíbený víc.
+        return best_sim * (best_aff + 1.0), best_name
 
     def recommend(self, all_titles: list[Title], ptw_ids: set[int],
                   watched_ids: set[int], show_progress=True,

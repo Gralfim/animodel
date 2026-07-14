@@ -94,8 +94,26 @@ class Interaction:
     a: str
     b: str
     label: str
-    n: float
-    lift: float           # reziduum navíc oproti součtu jednotlivých efektů
+    n: float              # vážená podpora páru (Σ w_a·w_b·w_titulu)
+    lift: float           # reziduum navíc oproti součtu jednotlivých efektů,
+                          # PO empiricko-bayesovském smrštění (stejné K jako efekty)
+    spoiler: bool = False # aspoň jeden z atributů je spoiler-flagged
+
+
+@dataclass
+class Triple:
+    """Hierarchická synergie TROJICE atributů (experiment, viz _fit_triples).
+
+    Lift je definovaný NAD nižšími řády: od průměrného rezidua titulů
+    nesoucích všechny tři atributy se odečtou jak singl efekty, tak lifty
+    párů uvnitř trojice (jen těch, které prošly prahem -- přesně to, co by
+    predikce pro tu kombinaci beztak dala; jinak by se tatáž struktura
+    započetla dvakrát)."""
+    keys: tuple           # (a, b, c) -- seřazené kanonické klíče
+    label: str
+    n: float              # vážená podpora (Σ w_a·w_b·w_c·w_titulu)
+    lift: float           # hierarchický lift po smrštění (stejné K jako efekty)
+    spoiler: bool = False
 
 
 @dataclass
@@ -107,6 +125,10 @@ class Cluster:
     intensity: float                 # −1 (lehké) … +1 (náročné)
     signature: list                  # [(key, label, category, distinctiveness, spoiler), ...]
     members: list                    # [(mal_id, title, user_score), ...] seřazeno
+    affinity: float = 0.0            # vážený průměr REZIDUÍ členů: o kolik
+                                     # náladu hodnotím nad baseline (komunita
+                                     # + můj posun) -- synergický efekt celé
+                                     # nálady, ne jen součtu jejích atributů
 
 
 class TasteModel:
@@ -121,12 +143,14 @@ class TasteModel:
         min_attr_count: float = 4.0,
         interaction_min_count: float = 8.0,
         interaction_min_lift: float = 0.30,
+        interaction_triples: bool = False,
         intensity: dict[str, float] | None = None,
     ):
         self.K = shrinkage_k
         self.min_attr_count = min_attr_count
         self.int_min_count = interaction_min_count
         self.int_min_lift = interaction_min_lift
+        self.use_triples = interaction_triples
         # Lexikon osy náročnosti {canon_klíč: −1..+1}; None = vestavěný
         # default (viz intensity.py). cli.py sem předává load_lexicon(...).
         self.intensity = intensity if intensity is not None else DEFAULT_LEXICON
@@ -136,6 +160,7 @@ class TasteModel:
         self.effects: dict[str, AttrEffect] = {}
         self.all_attr_keys: set[str] = set()
         self.interactions: list[Interaction] = []
+        self.triples: list[Triple] = []
         self.scale: float = 1.0           # globální faktor s z cross-validace
         self.cv_rmse: float = 0.0
         self.cv_mae: float = 0.0
@@ -160,6 +185,13 @@ class TasteModel:
         # search zbytečně na každém běhu (ověřeno živě: druhé volání přepisovalo
         # výsledek prvního, ne ho doplňovalo).
         self._fit_clusters(n_clusters)
+        # Trojice až PO klastrech -- kandidáty generují klastrové signatury.
+        # Do kalibrace scale (výš) nevstupují: CV fold-modely klastrování
+        # nedělají (drahé a nestabilní na 4/5 dat), takže by je stejně
+        # neuměly zrcadlit -- `s` se na ně aplikuje až při predikci.
+        self.triples = []
+        if self.use_triples:
+            self._fit_triples()
         return self
 
     # ── Baseline: můj průměr + sklon vůči komunitě ───────────────────────────
@@ -235,18 +267,21 @@ class TasteModel:
             )
 
     def _fit_interactions(self):
-        # Kandidáti = atributy s nezanedbatelným |effect| a dost vzorky
-        keys = [k for k, e in self.effects.items() if e.n_eff >= self.int_min_count]
+        # Kandidáti = atributy s dost vzorky (jinak kombinatorika × šum)
+        keyset = {k for k, e in self.effects.items() if e.n_eff >= self.int_min_count}
         # spočítej páry jen pro tituly (omezit kombinatoriku)
         pair_resid: dict[tuple, list[tuple[float, float]]] = defaultdict(list)
-        keyset = set(keys)
         for t in self.titles:
-            present = [k for k in t.attrs if k in keyset]
-            present.sort()
+            present = sorted(k for k in t.attrs if k in keyset)
             e = self._resid[t.mal_id]
             for i in range(len(present)):
                 for j in range(i + 1, len(present)):
-                    pair_resid[(present[i], present[j])].append((e, t.weight))
+                    a, b = present[i], present[j]
+                    # přítomnost páru vážená stejně jako u singl efektů:
+                    # součin vah atributů (AniList rank) × franšízová váha
+                    # titulu -- dřív se tag rank ignoroval (binární pár)
+                    w = t.attrs[a].weight * t.attrs[b].weight * t.weight
+                    pair_resid[(a, b)].append((e, w))
 
         self.interactions = []
         for (a, b), rows in pair_resid.items():
@@ -255,14 +290,75 @@ class TasteModel:
                 continue
             mean_pair = self._weighted_mean(rows)
             expected = self.effects[a].effect + self.effects[b].effect
-            lift = mean_pair - expected  # navíc oproti aditivnímu modelu
+            raw_lift = mean_pair - expected  # navíc oproti aditivnímu modelu
+            # stejné empiricko-bayesovské smrštění jako u efektů -- pár na
+            # hraně podpory dřív dostal plný lift (nekonzistence: singly
+            # smrštěné byly, jejich kombinace ne). Práh int_min_lift se teď
+            # vztahuje na SMRŠTĚNÝ lift, je tedy fakticky přísnější.
+            lift = (n / (n + self.K)) * raw_lift
             if abs(lift) >= self.int_min_lift:
                 self.interactions.append(Interaction(
                     a=a, b=b,
                     label=f"{self.effects[a].label} + {self.effects[b].label}",
                     n=n, lift=lift,
+                    spoiler=self.effects[a].spoiler or self.effects[b].spoiler,
                 ))
         self.interactions.sort(key=lambda x: -abs(x.lift))
+
+    def _fit_triples(self):
+        """
+        Hierarchické synergie trojic (experiment, config
+        model.interaction_triples). Kandidáti se negenerují slepou enumerací
+        (na ~450 titulech by volné hledání v prostoru trojic dalo šum), ale
+        z PODMNOŽIN KLASTROVÝCH SIGNATUR -- jádra nálad jsou přesně místa,
+        kde má smysl se ptát "funguje tahle kombinace jen pohromadě?".
+
+        Lift je definovaný nad nižšími řády (viz docstring Triple): odečítá
+        se přesně to, co by predikce pro tu kombinaci dala ze singlů a
+        prahem prošlých párů -- trojice tedy zachycuje JEN zbytek, žádné
+        dvojité počítání.
+        """
+        from itertools import combinations
+
+        self.triples = []
+        candidates: set[tuple] = set()
+        for c in self.clusters:
+            sig_keys = sorted({s[0] for s in c.signature})
+            candidates.update(combinations(sig_keys, 3))
+        if not candidates:
+            return
+
+        pair_lift = {(it.a, it.b): it.lift for it in self.interactions}
+        rows_by_triple: dict[tuple, list[tuple[float, float]]] = {c: [] for c in candidates}
+        for t in self.titles:
+            e = self._resid[t.mal_id]
+            for combo in candidates:
+                a, b, c = combo
+                if a in t.attrs and b in t.attrs and c in t.attrs:
+                    w = (t.attrs[a].weight * t.attrs[b].weight
+                         * t.attrs[c].weight * t.weight)
+                    rows_by_triple[combo].append((e, w))
+
+        for combo, rows in rows_by_triple.items():
+            n = sum(w for _, w in rows)
+            if n < self.int_min_count:
+                continue
+            mean = self._weighted_mean(rows)
+            a, b, c = combo
+            expected = (self.effects[a].effect + self.effects[b].effect
+                        + self.effects[c].effect
+                        + pair_lift.get((a, b), 0.0)
+                        + pair_lift.get((a, c), 0.0)
+                        + pair_lift.get((b, c), 0.0))
+            lift = (n / (n + self.K)) * (mean - expected)
+            if abs(lift) >= self.int_min_lift:
+                self.triples.append(Triple(
+                    keys=combo,
+                    label=" + ".join(self.effects[k].label for k in combo),
+                    n=n, lift=lift,
+                    spoiler=any(self.effects[k].spoiler for k in combo),
+                ))
+        self.triples.sort(key=lambda x: -abs(x.lift))
 
     def _raw_resid_pred(self, attrs: dict[str, AttrValue]) -> float:
         """Predikce rezidua PŘED globálním faktorem s (čistě aditivní část)."""
@@ -271,11 +367,18 @@ class TasteModel:
             e = self.effects.get(key)
             if e:
                 total += e.effect * av.weight
-        # interakce
+        # interakce -- škálované vahami atributů KANDIDÁTA (analogie
+        # `e.effect * av.weight` u singl efektů; slabě přítomný tag
+        # neaktivuje synergii naplno)
         present = set(attrs)
         for it in self.interactions:
             if it.a in present and it.b in present:
-                total += it.lift
+                total += it.lift * attrs[it.a].weight * attrs[it.b].weight
+        for tr in self.triples:
+            a, b, c = tr.keys
+            if a in present and b in present and c in present:
+                total += (tr.lift * attrs[a].weight
+                          * attrs[b].weight * attrs[c].weight)
         return total
 
     def _calibrate_scale(self):
@@ -370,8 +473,15 @@ class TasteModel:
         present = set(attrs)
         for it in self.interactions:
             if it.a in present and it.b in present:
-                spoil = (self.effects[it.a].spoiler or self.effects[it.b].spoiler)
-                contribs.append((it.label, "interakce", self.scale * it.lift, spoil))
+                w_pair = attrs[it.a].weight * attrs[it.b].weight
+                contribs.append((it.label, "interakce",
+                                 self.scale * it.lift * w_pair, it.spoiler))
+        for tr in self.triples:
+            a, b, c = tr.keys
+            if a in present and b in present and c in present:
+                w_tri = attrs[a].weight * attrs[b].weight * attrs[c].weight
+                contribs.append((tr.label, "interakce",
+                                 self.scale * tr.lift * w_tri, tr.spoiler))
         contribs.sort(key=lambda x: -abs(x[2]))
         return pred, lo, hi, contribs
 
@@ -488,18 +598,20 @@ class TasteModel:
             mem = sorted(
                 [(meta[i].mal_id, meta[i].title, meta[i].user_score) for i in members_i],
                 key=lambda x: -x[2])
-            # průměrné skóre a intenzita klastru vážené franšízovými vahami --
-            # `size` zůstává prostý počet titulů (zobrazovací údaj)
+            # průměrné skóre, intenzita a afinita klastru vážené franšízovými
+            # vahami -- `size` zůstává prostý počet titulů (zobrazovací údaj)
             w_tot = float(w_sub.sum())
             mean_score = float(sum(w * meta[i].user_score
                                    for w, i in zip(w_sub, members_i)) / w_tot)
             inten = float(sum(w * self.intensity_of(meta[i].attrs)
                               for w, i in zip(w_sub, members_i)) / w_tot)
+            aff = float(sum(w * self._resid[meta[i].mal_id]
+                            for w, i in zip(w_sub, members_i)) / w_tot)
             name = " / ".join(s[1] for s in signature[:3]) or f"Klastr {c+1}"
             clusters.append(Cluster(
                 idx=c, name=name, size=len(mem),
                 mean_user_score=mean_score, intensity=inten,
-                signature=signature, members=mem,
+                signature=signature, members=mem, affinity=aff,
             ))
         clusters.sort(key=lambda x: -x.size)
         self.clusters = clusters

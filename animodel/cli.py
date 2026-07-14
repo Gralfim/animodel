@@ -136,6 +136,7 @@ def run(args) -> int:
         min_attr_count=cfg.model.min_attr_count,
         interaction_min_count=cfg.model.interaction_min_count,
         interaction_min_lift=cfg.model.interaction_min_lift,
+        interaction_triples=cfg.model.interaction_triples,
         intensity=lexicon,
     )
     model.fit(titles, n_clusters=cfg.model.n_clusters)

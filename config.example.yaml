@@ -10,6 +10,8 @@ model:
   min_attr_count: 4.0       # min. efektivní počet titulů, aby atribut vstoupil
   interaction_min_count: 8.0
   interaction_min_lift: 0.30
+  interaction_triples: false  # EXPERIMENT: synergie trojic nad jádry nálad
+                              # (hierarchický lift nad singly a páry)
   n_clusters: null          # null = auto podle siluety (4–7); nebo napevno např. 5
   aggregate_franchises: true
   side_story_weight: 0.5    # vliv vedlejšího obsahu franšízy (OVA/speciál/side

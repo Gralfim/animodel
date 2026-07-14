@@ -74,14 +74,20 @@ animodel proto **necílí na známku, ale na odchylku**:
    průměr afinity: `efekt = (n/(n+K))·průměr`. Malé vzorky se táhnou k nule, takže
    tě neošálí žánr viděný 2×. Vedle efektu se počítá i `Δ komunita` = intuitivní
    „o kolik výš než dav to hodnotíš".
-4. **Interakce.** Dvojice atributů, kde afinita převyšuje součet jednotlivých
-   efektů — tvé „sladké tečky".
+4. **Interakce.** Dvojice atributů, kde se afinita liší od součtu jednotlivých
+   efektů — oběma směry: „sladké tečky" i kombinace, které si nesedí. Lift je
+   smrštěný stejně jako efekty a vážený přítomností atributů; obojí vstupuje
+   do predikce i řazení doporučení. Volitelně (`model.interaction_triples`)
+   i **trojice nad jádry nálad**: kandidáti z klastrových signatur,
+   hierarchický lift = zbytek nad singly a páry (žádné dvojité počítání).
 5. **Nálady (módy).** KMeans na normalizovaných atributových vektorech; počet
    klastrů se volí podle siluety. Každý klastr dostane **osu náročnosti**
    (těžké drama/psycho vs. lehká komedie/slice-of-life) — to je ta „emocionální
    únava", kvůli které mezi módy přepínáš. Osu řídí **intensity lexikon**
    (`intensity.yaml`, viz níž): spojité hodnoty −1…+1 na atribut, generované
-   z úplného universa tagů a revidovatelné v jednom souboru.
+   z úplného universa tagů a revidovatelné v jednom souboru. Každá nálada má
+   navíc **afinitu** — vážený průměr reziduí svých členů (o kolik ji hodnotíš
+   nad baseline) — kterou doporučení používají místo surové známky.
 6. **Kalibrace.** Globální škála efektů a interval predikce z 5-násobné
    cross-validace.
 
@@ -172,6 +178,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `model.n_clusters` | `null` = auto; nebo napevno počet nálad |
 | `model.intensity_lexicon` | cesta k intensity.yaml (osa náročnosti, viz `--gen-intensity`) |
 | `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
+| `model.interaction_triples` | experiment: synergie trojic nad jádry nálad |
 | `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
 | `recommend.w_taste_fit / w_cf / w_quality` | váhy řazení doporučení |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |

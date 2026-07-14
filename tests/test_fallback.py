@@ -54,6 +54,20 @@ def test_attributes_jikan_wins_format_and_decade_when_both_present():
     assert "2020s" not in attrs
 
 
+def test_anilist_format_labels_keep_acronyms_and_source_other_is_filtered():
+    m = _media(1, 100)
+    m["format"] = "OVA"
+    m["source"] = "OTHER"
+    attrs = build_attributes(None, m, anilist_min_rank=30)
+    assert attrs["ova"].label == "OVA"          # ne "Ova" (dřívější .title() bug)
+    assert "other" not in attrs                  # source OTHER = žádná informace,
+                                                 # jen by strašil ve vysvětleních
+    m2 = _media(2, 200)
+    m2["format"] = "TV_SHORT"
+    attrs2 = build_attributes(None, m2, anilist_min_rank=30)
+    assert attrs2["tv_short"].label == "TV Short"
+
+
 def test_attributes_anilist_genres_merge_with_mal_genres_without_duplication():
     jikan = {"genres": [{"name": "Comedy"}], "themes": [], "demographics": [],
              "source": "", "type": "", "year": None, "studios": []}

@@ -71,6 +71,15 @@ def resolve_alias(key: str) -> str:
     return ALIAS.get(key, key)
 
 
+# AniList Media.format (UPPER_SNAKE) → zobrazovací label ve stylu MAL.
+# Kanonický klíč je stejný tak jako tak (canon() case ignoruje) -- tohle je
+# čistě kosmetika labelů ve vysvětleních a tabulkách.
+_ANILIST_FORMAT_LABELS = {
+    "TV": "TV", "TV_SHORT": "TV Short", "MOVIE": "Movie", "SPECIAL": "Special",
+    "OVA": "OVA", "ONA": "ONA", "MUSIC": "Music",
+}
+
+
 # ── Atribut ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -177,12 +186,19 @@ def build_attributes(
         # jiný rok premiéry) vyrobila dva atributy pro jeden koncept.
         if not (jikan and jikan.get("source")):
             asrc = (anilist.get("source") or "").strip()
-            if asrc:
+            # stejný filtr jako u Jikan source výš -- "OTHER" není informace
+            # a jako atribut by se zobrazoval ve vysvětleních doporučení
+            if asrc and asrc.lower() not in ("unknown", "other"):
                 _add(out, asrc.replace("_", " ").title(), "source", 1.0)
         if not (jikan and jikan.get("type")):
             afmt = (anilist.get("format") or "").strip()
             if afmt:
-                _add(out, afmt.replace("_", " ").title(), "format", 1.0)
+                # AniList formáty jsou UPPER_SNAKE; .title() dělal z "TV"
+                # label "Tv" (a "Ona", "Ova") -- zkratky drž velké, ať labely
+                # odpovídají MAL podobě a kanonizace je sloučí i vizuálně
+                label = _ANILIST_FORMAT_LABELS.get(afmt.upper(),
+                                                   afmt.replace("_", " ").title())
+                _add(out, label, "format", 1.0)
         if not (jikan and jikan.get("year")):
             ayear = anilist.get("seasonYear") or (anilist.get("startDate") or {}).get("year")
             if ayear:

@@ -14,8 +14,12 @@ from pathlib import Path
 class ModelCfg:
     shrinkage_k: float = 8.0          # síla smrštění efektů k nule (vyšší = konzervativnější)
     min_attr_count: float = 4.0       # min. efektivní počet titulů, aby atribut vstoupil
-    interaction_min_count: float = 8.0
-    interaction_min_lift: float = 0.30
+    interaction_min_count: float = 8.0  # min. VÁŽENÁ podpora páru (Σ w_a·w_b·w_titulu)
+    interaction_min_lift: float = 0.30  # práh na SMRŠTĚNÝ lift (n/(n+K), jako efekty);
+                                        # když synergií prochází málo, sniž (např. 0.2)
+    interaction_triples: bool = False   # EXPERIMENT: hierarchické synergie trojic
+                                        # nad klastrovými signaturami (jádra nálad);
+                                        # sdílí prahy interaction_min_count/_lift
     n_clusters: int | None = None     # None = automaticky podle siluety (4–7)
     aggregate_franchises: bool = True # sequel/prequel → jeden vážený datový bod
     side_story_weight: float = 0.5    # příspěvek vedlejšího obsahu (OVA/speciál/
