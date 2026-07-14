@@ -261,10 +261,16 @@ def main(argv=None) -> int:
     # identicky jako běžný print() text, jen se navíc chovaly jinak
     # (stderr, nebufferované) než progress výpisy (stdout, bufferované), což
     # dělalo dojem, že log je plný "chyb" a progress info chybí.
+    #
+    # ProgressAwareLogHandler navíc spolupracuje s \r progress řádkou:
+    # před vypsáním záznamu ji smaže a po něm překreslí, takže série
+    # warningů (např. při výpadku Jikanu) roluje NAD progress řádkem,
+    # místo aby ji rozbila a schovala aktuální stav stahování.
+    from .sources import ProgressAwareLogHandler
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s [%(name)s] %(message)s",
-        stream=sys.stderr,
+        handlers=[ProgressAwareLogHandler(sys.stderr)],
     )
     return run(args)
 
