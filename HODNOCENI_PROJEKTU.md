@@ -190,6 +190,13 @@ neotáčel:
 
 ### 5.1 `config.yaml`: extrémní hodnoty pro `user_cf_*` (vysoká priorita)
 
+> **Stav (2026-07-14): UZAVŘENO — závěr revidován.** Hodnoty jsou vědomé
+> ladění (users_per_seed=4950 těsně pod AniList cap 5000, commity
+> „CF-model tuning"), ne omyl; hypotéza „omylem přenesená čísla" níže byla
+> chybná. Uživatel potvrzen: experiment za hranicí původního návrhu, CF
+> část plánuje v budoucnu přepracovat. Per-page watchers cache mezitím
+> dělá dlouhé CF běhy přerušitelnými/obnovitelnými.
+
 Aktuální `config.yaml` (na disku, se `use_user_cf: true`) má:
 
 ```yaml
@@ -243,6 +250,11 @@ hotové `sub` modely dovnitř.
 
 ### 5.3 Rozjeté defaulty `TasteModel.__init__` vs. `config.py` (nízká priorita)
 
+> **Stav (2026-07-14): OPRAVENO.** Defaulty sjednoceny na hodnoty ModelCfg
+> (4.0 / 8.0 / 0.30); synchronizaci hlídá `tests/test_config_defaults.py`.
+> Test harness teď běží se stejnými prahy jako produkce (scale na fixture
+> 0.100 → 0.250 — dřívější rozdíl byl přesně projev téhle chyby).
+
 `TasteModel.__init__` má vlastní defaulty (`min_attr_count=3.0,
 interaction_min_count=6.0, interaction_min_lift=0.25`), které se liší od
 `ModelCfg` v `config.py` (`4.0, 8.0, 0.30`). `cli.py` vždy předává explicitní
@@ -265,7 +277,7 @@ konsolidovaný přehled, co čeká na rozhodnutí:
 | `aggregate_entries` (kolaps franšíze na 1 záznam) | `series.py:130` | ~~funkční, ale nenapojené~~ **SMAZÁNO (2026-07-14)** po diskuzi — vážený přístup vyhrál (zachovává vnitro-franšízový signál, degraduje elegantně). Zároveň doplněno: `side_story_weight` (OVA/speciály tišeji), váhy propsané do klastrování, `seeds_per_franchise` limit. |
 | Shikimori `/similar` | `sources/shikimori.py` | výchozí vypnuto — tvar odpovědi (rank vs. holý seznam) není ověřený naživo, `REQUEST_DELAY=1.0` je odhad. |
 | `include_staff` (režie/scénář jako signál) | `config.py` | funkční, výchozí vypnuto (cena: +1 Jikan volání/titul). |
-| Cache bez expirace | `sources/*.py` | **žádný TTL ani `--refresh-cache` flag** — jednou stažené `averageScore`/`popularity`/tagy zůstávají v cache navždy, i když se použije nástroj opakovaně za měsíce. U aktuálně vysílaných sérií (kde se komunitní skóre rychle mění) to může tiše zkreslovat `w_quality` a `min_community` filtr. Není zdokumentované jako záměr, spíš chybějící funkce. |
+| Cache bez expirace | `sources/*.py` | **UZAVŘENO ROZHODNUTÍM (2026-07-14)**: uživatel preferuje ruční mazání cache dle potřeby; TTL/`--refresh-cache` se nebude implementovat. (Cache je od refaktoru 1 request = 1 soubor, takže jde selektivně smazat i jen část.) |
 | `--analyze` | `cli.py` | doplněné (podle changelogu), ale je to jediná diagnostická cesta — žádný ekvivalent pro "co se nematchlo v attributes" mimo `unmatched_intensity_keywords()`. |
 
 ---
@@ -273,6 +285,12 @@ konsolidovaný přehled, co čeká na rozhodnutí:
 ## 7. Křehké konstrukce
 
 ### 7.1 Nulové pokrytí automatickými testy nad síťovou vrstvou (vysoká priorita)
+
+> **Stav (2026-07-14): VYŘEŠENO.** `tests/` má 105 testů: cache sémantika
+> (permanent/transient), sdílený retry driver, všichni tři klienti nad
+> mockovaným requests, intensity lexikon, spoiler pipeline, franšízové
+> váhy, kalibrace, progress/log souhra. Cestou nalezen a opraven reálný
+> bug (Jikan cachoval trvalá selhání jako `null` ≙ cache miss).
 
 `animodel_test_harness.py` je jediný test v repozitáři a testuje výhradně
 `taste.py` na syntetických datech bez sítě. **Nic netestuje:**
@@ -294,6 +312,12 @@ zlomek úsilí.
 
 ### 7.2 HEAVY/LIGHT lexikon (`taste.py`) — přiznaná výjimka z vlastního principu
 
+> **Stav (2026-07-14): VYŘEŠENO.** HEAVY/LIGHT množiny nahrazeny generovaným
+> spojitým lexikonem (`intensity.yaml`, `--gen-intensity`): množina klíčů je
+> exaktní z universa (AniList MediaTagCollection + GenreCollection + Jikan
+> žánry/témata), hodnoty revidovatelné v jednom souboru, spoiler tagy
+> (Tragedy, …) nově vstupují do modelu s příznakem a HTML přepínačem.
+
 Projekt jinde důsledně odmítá ruční seznamy atributů (viz `attributes.py`
 docstring), ale osa "emocionální náročnosti" je jediná ručně kurátorovaná
 množina klíčů (`HEAVY`/`LIGHT`, ~30 položek). Kód to sám otevřeně komentuje a
@@ -305,6 +329,11 @@ dostane `intensity=0` (neutrální) tiše, bez chyby — ne proto, že by titul 
 skutečně neutrální.
 
 ### 7.3 `similar_users_recommendations` — jedna metoda, šest odpovědností
+
+> **Stav (2026-07-14): ODLOŽENO ZÁMĚRNĚ.** Uživatel plánuje celou user-CF
+> část v budoucnu přepracovat (současný config ji vědomě tlačí za hranice
+> původního návrhu) — do té doby jen údržba korektnosti, žádný refaktor.
+> Watchers stránkování už mezitím přešlo na per-page cache.
 
 Viz §2 — ~340 řádků: výběr seedů podle vzácnosti, IDF váhování, stránkované
 stahování s cache, Pearsonova korelace, řešení soukromých účtů, finální
@@ -331,6 +360,12 @@ side-story vazbou), ale je to tichý předpoklad, ne ověřené rozhodnutí.
 
 ### 7.5 Config bez validace rozsahů
 
+> **Stav (2026-07-14): PONECHÁNO VĚDOMĚ OTEVŘENÉ.** Hlavní motivace (§5.1)
+> se ukázala být vědomým laděním, ne omylem — varování by tehdy byla
+> falešně pozitivní. Validační vrstva by teď byla obranná mašinérie bez
+> potvrzené potřeby; přidat až pokud se chybná konfigurace někdy reálně
+> projeví (viz zásada: existující failure path je bezpečná, jen pomalá).
+
 `Config.load()` (`config.py`) přebírá jakoukoli hodnotu z YAML bez kontroly
 typu nebo rozsahu (`setattr(sub, kk, vv)`) — proto mohla vzniknout situace z
 §5.1 beze slova varování. Přidání i jen orientačních sanity-checků (např. varovat,
@@ -342,21 +377,24 @@ uživatel čeká hodiny na prázdný výsledek.
 
 ## 8. Doporučení — pořadí podle poměru přínos/náklad
 
-1. **Ověř `config.yaml` `user_cf_*` hodnoty** (§5.1) — buď je to záměr (pak
-   stojí za komentář v souboru proč), nebo je to omyl a stačí vrátit na
-   defaulty z `config.example.yaml`. Nulová cena opravy, vysoký dopad.
-2. **Oprav zbytečné 21× přefitování v `_calibrate_scale`** (§5.2) — lokální
-   změna ve dvou metodách, měřitelné zrychlení `fit()`.
-3. **Přidej hrstku testů nad `sources/__init__.py` a `attributes.py`** (§7.1) —
-   nejlevnější pojistka proti regresi v nejkřehčí a nejvíc opravované části
-   kódu.
-4. **Rozhodni osud `aggregate_entries`** (§6) — buď smazat, nebo zapojit jako
-   `--aggregate-mode` přepínač; dead code s aktivní alternativou matoucí pro
-   budoucí čtenáře.
-5. **Cache TTL / `--refresh-cache` flag** (§6) — nutné až při delším provozu
-   napříč měsíci, ne akutní teď.
-6. Sjednoť defaulty `TasteModel.__init__` s `ModelCfg` (§5.3) — kosmetika,
-   ale snadná.
+> **Stav (2026-07-14): VŠECHNY BODY UZAVŘENÉ.** Detaily u jednotlivých sekcí.
+
+1. ~~**Ověř `config.yaml` `user_cf_*` hodnoty** (§5.1)~~ — vědomé ladění,
+   CF část se bude v budoucnu přepracovávat.
+2. ~~**Oprav zbytečné 21× přefitování v `_calibrate_scale`** (§5.2)~~ —
+   opraveno (116 → 6 fitů, numericky identické výsledky).
+3. ~~**Přidej hrstku testů** (§7.1)~~ — 105 testů napříč cache/retry/klienty/
+   modelem; cestou nalezen reálný cache bug.
+4. ~~**Rozhodni osud `aggregate_entries`** (§6)~~ — smazáno; navíc
+   `side_story_weight`, váhy v klastrování a `seeds_per_franchise`.
+5. ~~**Cache TTL / `--refresh-cache` flag** (§6)~~ — uzavřeno rozhodnutím:
+   ruční mazání dle potřeby (per-request soubory to umožňují selektivně).
+6. ~~Sjednoť defaulty `TasteModel.__init__` s `ModelCfg` (§5.3)~~ — sjednoceno,
+   synchronizaci hlídá test.
+
+Jediný vědomě otevřený bod zůstává §7.5 (validace configu) — bez potvrzené
+potřeby se implementovat nebude; a §7.3 (CF refaktor) čeká na plánované
+přepracování celé CF části.
 
 ---
 

@@ -112,10 +112,15 @@ class Cluster:
 class TasteModel:
     def __init__(
         self,
+        # Defaulty drž v synchronu s config.ModelCfg (hlídá to test
+        # tests/test_config_defaults.py) -- cli.py sice předává hodnoty
+        # explicitně, ale test harness a programové použití (README)
+        # konstruují TasteModel jen s částí argumentů a dřív tak tiše
+        # běžely s jinými prahy než produkce (HODNOCENI_PROJEKTU.md §5.3).
         shrinkage_k: float = 8.0,
-        min_attr_count: float = 3.0,
-        interaction_min_count: float = 6.0,
-        interaction_min_lift: float = 0.25,
+        min_attr_count: float = 4.0,
+        interaction_min_count: float = 8.0,
+        interaction_min_lift: float = 0.30,
         intensity: dict[str, float] | None = None,
     ):
         self.K = shrinkage_k
