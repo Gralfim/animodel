@@ -271,23 +271,39 @@ class TasteModel:
         return total
 
     def _calibrate_scale(self):
-        """Najde globální faktor s ∈ [0,1] minimalizující CV RMSE; uloží i intervaly."""
-        best_s, best_rmse = 0.0, float("inf")
+        """
+        Najde globální faktor s ∈ [0,1] minimalizující CV RMSE; uloží i intervaly.
+
+        Fold-modely se fitují jen JEDNOU (viz _cv_predictions) -- fit na `s`
+        vůbec nezávisí, `s` vstupuje až do predikce. Dřívější verze volala
+        celou cross-validaci (včetně přefitování všech foldů) pro každou z
+        21 hodnot gridu + 2 dodatečná vyhodnocení = 115 fold-fitů místo 5
+        (HODNOCENI_PROJEKTU.md §5.2); výsledky jsou numericky identické,
+        jen se neplýtvá.
+        """
+        rows = self._cv_predictions()
+        best_s, best_rmse, best_mae = 0.0, float("inf"), 0.0
         for s in [i / 20 for i in range(0, 21)]:
-            rmse, _ = self._cross_val(s)
+            rmse, mae = self._eval_scale(rows, s)
             if rmse < best_rmse:
-                best_rmse, best_s = rmse, s
+                best_rmse, best_s, best_mae = rmse, s, mae
         self.scale = best_s
-        self.cv_rmse, self.cv_mae = self._cross_val(best_s)
-        self.baseline_rmse, _ = self._cross_val(0.0)   # jen ū + beta·komunita
+        self.cv_rmse, self.cv_mae = best_rmse, best_mae
+        self.baseline_rmse, _ = self._eval_scale(rows, 0.0)   # jen ū + beta·komunita
         self.resid_std = self.cv_rmse
 
-    def _cross_val(self, s: float, folds: int = 5, seed: int = 42):
+    def _cv_predictions(self, folds: int = 5, seed: int = 42) -> list[tuple[float, float, float]]:
+        """
+        Jednou přefituje fold-modely a pro každý out-of-fold titul vrátí
+        trojici (baseline_predikce, surové_reziduum, skutečné_skóre).
+        Vyhodnocení libovolného `s` je pak čistá aritmetika nad těmito
+        trojicemi (_eval_scale) -- žádné další fitování.
+        """
         rng = random.Random(seed)
         idx = list(range(len(self.titles)))
         rng.shuffle(idx)
         fold_of = {i: k % folds for k, i in enumerate(idx)}
-        sq, ab, n = 0.0, 0.0, 0
+        rows: list[tuple[float, float, float]] = []
         for f in range(folds):
             train = [self.titles[i] for i in idx if fold_of[i] != f]
             test = [self.titles[i] for i in idx if fold_of[i] == f]
@@ -299,12 +315,22 @@ class TasteModel:
             sub._fit_effects()
             sub._fit_interactions()
             for t in test:
-                pred = sub._baseline_pred(t.community) + s * sub._raw_resid_pred(t.attrs)
-                pred = max(1.0, min(10.0, pred))
-                err = pred - t.user_score
-                sq += err * err
-                ab += abs(err)
-                n += 1
+                rows.append((sub._baseline_pred(t.community),
+                             sub._raw_resid_pred(t.attrs),
+                             t.user_score))
+        return rows
+
+    @staticmethod
+    def _eval_scale(rows: list[tuple[float, float, float]], s: float) -> tuple[float, float]:
+        """(RMSE, MAE) pro dané `s` nad předpočítanými CV predikcemi --
+        stejný výpočet (včetně ořezu na 1–10) jako dřívější _cross_val."""
+        sq = ab = 0.0
+        for base, raw, y in rows:
+            pred = max(1.0, min(10.0, base + s * raw))
+            err = pred - y
+            sq += err * err
+            ab += abs(err)
+        n = len(rows)
         rmse = math.sqrt(sq / n) if n else 0.0
         mae = ab / n if n else 0.0
         return rmse, mae

@@ -220,6 +220,12 @@ stojí za ověření/vysvětlení, než se `--user-cf` pustí naostro.
 
 ### 5.2 `TasteModel._calibrate_scale()`: 21× zbytečné přefitování (střední priorita)
 
+> **Stav (2026-07-14): OPRAVENO.** Fold-modely se fitují jen jednou
+> (`_cv_predictions`), grid přes `s` je čistá aritmetika (`_eval_scale`).
+> Ověřeno numericky identickými výsledky (scale/CV RMSE/MAE/baseline na
+> harness datech beze změny), 116 → 6 fitů, kalibrace ~12× rychlejší.
+> Regresní testy v `tests/test_taste_calibration.py`.
+
 `_calibrate_scale()` prochází 21 kandidátních hodnot `s` a pro každou volá
 `_cross_val(s)`. Uvnitř `_cross_val()` se ale pro každý z 5 foldů **znovu**
 volá `sub._fit_baseline()` + `sub._fit_effects()` + `sub._fit_interactions()`
