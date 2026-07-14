@@ -78,9 +78,13 @@ class AttrValue:
     category: str   # genre | theme | tag | studio | demographic | source | format | decade
     weight: float   # 0–1 (binární příznak = 1.0)
     label: str      # hezký název pro zobrazení
+    spoiler: bool = False  # AniList isGeneralSpoiler/isMediaSpoiler -- atribut
+                           # vstupuje do modelu normálně, jen se v HTML reportu
+                           # dá skrýt přepínačem (viz report.py)
 
 
-def _add(out: dict[str, AttrValue], raw_name: str, category: str, weight: float):
+def _add(out: dict[str, AttrValue], raw_name: str, category: str, weight: float,
+         spoiler: bool = False):
     """Přidá atribut; při kolizi klíče ponechá vyšší váhu a kategorii dle priority."""
     key = resolve_alias(canon(raw_name))
     if not key:
@@ -90,15 +94,17 @@ def _add(out: dict[str, AttrValue], raw_name: str, category: str, weight: float)
         prev = out[key]
         # vyšší váha vyhrává
         new_w = max(prev.weight, weight)
+        # spoiler stačí z jednoho zdroje (opatrnější varianta vyhrává)
+        new_s = prev.spoiler or spoiler
         # kategorie dle priority (nižší index = vyšší priorita)
         def pr(c):
             return CATEGORY_PRIORITY.index(c) if c in CATEGORY_PRIORITY else 99
         if pr(category) < pr(prev.category):
-            out[key] = AttrValue(category, new_w, label)
+            out[key] = AttrValue(category, new_w, label, new_s)
         else:
-            out[key] = AttrValue(prev.category, new_w, prev.label)
+            out[key] = AttrValue(prev.category, new_w, prev.label, new_s)
     else:
-        out[key] = AttrValue(category, weight, label)
+        out[key] = AttrValue(category, weight, label, spoiler)
 
 
 def build_attributes(
@@ -145,21 +151,42 @@ def build_attributes(
 
     # ── AniList ──────────────────────────────────────────────────
     if anilist:
+        # Žánry bezpodmínečně -- kanonizace je stejně sloučí s MAL žánry
+        # (stejný klíč), takže v normálním režimu nic nezdvojí a v nouzovém
+        # AniList-only režimu (--no-jikan) nesou žánrový signál samy.
+        for g in anilist.get("genres") or []:
+            _add(out, g, "genre", 1.0)
         for tag in anilist.get("tags", []) or []:
-            if tag.get("isAdult") or tag.get("isGeneralSpoiler") or tag.get("isMediaSpoiler"):
+            if tag.get("isAdult"):
                 continue
             rank = (tag.get("rank") or 0)
             if rank < anilist_min_rank:
                 continue
-            _add(out, tag["name"], "tag", rank / 100.0)
+            # Spoiler tagy (Tragedy, Tearjerker, ...) se dřív zahazovaly
+            # úplně -- model tak přicházel o nejsilnější signály osy
+            # náročnosti. Teď vstupují normálně, jen nesou příznak, podle
+            # kterého je HTML report umí skrýt (rozhodnutí uživatele).
+            spoiler = bool(tag.get("isGeneralSpoiler") or tag.get("isMediaSpoiler"))
+            _add(out, tag["name"], "tag", rank / 100.0, spoiler=spoiler)
         if include_studios:
             for node in anilist.get("studios", {}).get("nodes", []) or []:
                 if node.get("isAnimationStudio"):
                     _add(out, node["name"], "studio", 1.0)
+        # Source/format/dekáda jen jako fallback (MAL má přednost, když ho
+        # máme) -- u formátu/dekády by rozdílná hodnota z obou zdrojů (např.
+        # jiný rok premiéry) vyrobila dva atributy pro jeden koncept.
         if not (jikan and jikan.get("source")):
             asrc = (anilist.get("source") or "").strip()
             if asrc:
                 _add(out, asrc.replace("_", " ").title(), "source", 1.0)
+        if not (jikan and jikan.get("type")):
+            afmt = (anilist.get("format") or "").strip()
+            if afmt:
+                _add(out, afmt.replace("_", " ").title(), "format", 1.0)
+        if not (jikan and jikan.get("year")):
+            ayear = anilist.get("seasonYear") or (anilist.get("startDate") or {}).get("year")
+            if ayear:
+                _add(out, f"{(int(ayear)//10)*10}s", "decade", 1.0)
 
     # ── Staff (režie / scénář) ─────────────────────────────────────
     # Samostatná kategorie na osobu+roli (ne jen na osobu), protože dobrý

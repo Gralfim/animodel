@@ -35,6 +35,11 @@ def test_load_lexicon_clips_out_of_range_and_skips_non_numeric(tmp_path):
 # ── universum + generování ───────────────────────────────────────────────
 
 class FakeAniList:
+    def get_genre_collection(self):
+        # "Drama" se dedupuje s MAL žánrem (stejný canon klíč), "Sci-Fi"
+        # projde aliasem na science_fiction
+        return ["Drama", "Sci-Fi"]
+
     def get_tag_collection(self):
         return [
             {"name": "Tearjerker", "description": "Sad stuff.",
@@ -60,13 +65,25 @@ class FakeJikan:
         return []
 
 
-def test_build_universe_merges_sources_and_skips_adult_and_spoiler():
+def test_build_universe_merges_sources_and_skips_adult_only():
     universe = build_universe(jikan=FakeJikan(), anilist=FakeAniList())
     keys = {e["key"] for e in universe}
-    assert keys == {"comedy", "drama", "psychological",
-                    "tearjerker", "coming_of_age", "josei_fantasy", "kuudere"}
-    # isAdult (Nudity) a isGeneralSpoiler (Plot Twist) vynechány -- stejná
-    # pravidla jako build_attributes(), jinak by v lexikonu nic netrefily
+    assert keys == {"comedy", "drama", "psychological", "science_fiction",
+                    "tearjerker", "coming_of_age", "josei_fantasy", "kuudere",
+                    "plot_twist"}
+    # isAdult (Nudity) vynechán -- build_attributes() adult tagy zahazuje,
+    # v lexikonu by nikdy nic netrefil. Spoiler tag (Plot Twist) je naopak
+    # ZAHRNUTÝ -- od 2026-07 vstupují spoiler tagy do modelu s příznakem.
+    # "Drama" z GenreCollection se dedupovalo s MAL žánrem (jeden klíč),
+    # "Sci-Fi" prošlo aliasem na science_fiction.
+
+
+def test_build_universe_anilist_only_still_has_genres():
+    """--no-jikan režim: žánry musí přijít z GenreCollection, jinak by osa
+    náročnosti přišla o comedy/drama/... (nejsilnější klíče)."""
+    universe = build_universe(jikan=None, anilist=FakeAniList())
+    keys = {e["key"] for e in universe}
+    assert "drama" in keys and "science_fiction" in keys
 
 
 def test_category_prior_matches_by_prefix():
@@ -85,10 +102,10 @@ def test_generate_prefills_curated_then_prior_then_zero(tmp_path):
     assert lex["comedy"] == CURATED["comedy"]
     assert lex["josei_fantasy"] == category_prior("Theme-Comedy")  # prior
     assert lex["kuudere"] == 0.0                            # nic -> neutrální
-    assert stats["total"] == 7
+    assert stats["total"] == 9
     assert stats["from_curated"] >= 4    # comedy, drama, psychological, tearjerker, coming_of_age
-    assert stats["from_prior"] == 1
-    assert stats["zero"] == 1
+    assert stats["from_prior"] == 2      # josei_fantasy + plot_twist (spoiler tag, Theme-Drama)
+    assert stats["zero"] == 2            # kuudere + science_fiction
 
 
 def test_generate_preserves_existing_user_values_on_regeneration(tmp_path):

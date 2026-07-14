@@ -57,6 +57,11 @@ def test_get_anime_success_is_cached(tmp_path, no_sleep):
     assert post.calls == 1
     assert client.get_anime(1) == media   # z cache
     assert post.calls == 1
+    # cache klíč nese verzi schématu dotazu (v2 = genres/description/
+    # seasonYear/relations) -- starý mal_{id} bez verze se už nepoužívá,
+    # jinak by staré soubory bez nových polí vypadaly jako platná data
+    assert client._cache.has("mal_1_v2")
+    assert not client._cache.has("mal_1")
 
 
 def test_confirmed_missing_media_is_permanent_and_cached(tmp_path, no_sleep):
@@ -132,6 +137,16 @@ def test_get_tag_collection_transient_failure_returns_empty_uncached(tmp_path, n
     assert client.get_tag_collection() == []
     # transient -> necachováno, příště se zkusí znovu
     assert client._cache.get("tag_collection") is None
+
+
+def test_get_genre_collection_success_is_cached(tmp_path, no_sleep):
+    resp = FakeResponse(200, {"data": {"GenreCollection": ["Comedy", "Drama"]}})
+    client, post = make_client(tmp_path, [resp], no_sleep)
+
+    assert client.get_genre_collection() == ["Comedy", "Drama"]
+    assert post.calls == 1
+    assert client.get_genre_collection() == ["Comedy", "Drama"]   # z cache
+    assert post.calls == 1
 
 
 def test_get_recommendations_empty_success_is_cached_permanently(tmp_path, no_sleep):

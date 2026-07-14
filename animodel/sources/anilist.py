@@ -38,43 +38,18 @@ MAX_WATCHER_PAGE    = 5000 // 50      # AniList limit: page*perPage ≤ 5000
 NO_PROGRESS_PAGE_LIMIT = 5            # kolik stránek bez nového uživatele
                                        # ještě zkusit než to vzdát
 
-# GraphQL dotaz — stáhne tagy, studia a základní metadata přes MAL ID
-QUERY_BY_MAL_ID = """
-query ($idMal: Int) {
-  Media(idMal: $idMal, type: ANIME) {
-    id
-    idMal
-    title { romaji english }
-    tags {
-      name
-      rank
-      isAdult
-      isGeneralSpoiler
-      isMediaSpoiler
-      category
-    }
-    studios {
-      nodes { name isAnimationStudio }
-    }
-    format
-    source
-    averageScore
-    popularity
-    favourites
-  }
-}
-"""
-
-# GraphQL dotaz pro hromadné stažení (až 50 ID najednou)
-# Anilist nemá batch endpoint pro arbitrary IDs, ale
-# můžeme stránkovat přes idMal_in
-QUERY_BATCH = """
-query ($ids: [Int]) {
-  Page(perPage: 50) {
-    media(idMal_in: $ids, type: ANIME) {
+# Sdílený výčet polí pro Media — jediné místo definice, ať se single a batch
+# dotaz nemohou rozjet. Pole genres/description/seasonYear/startDate/relations
+# přidána kvůli nouzovému AniList-only režimu (--no-jikan): pokrývají to, co
+# jinak dodává Jikan (žánry, synopse, dekáda, franšízové vazby).
+_MEDIA_FIELDS = """
       id
       idMal
       title { romaji english }
+      genres
+      description
+      seasonYear
+      startDate { year }
       tags {
         name
         rank
@@ -86,21 +61,49 @@ query ($ids: [Int]) {
       studios {
         nodes { name isAnimationStudio }
       }
+      relations {
+        edges {
+          relationType
+          node { idMal type }
+        }
+      }
       format
       source
       averageScore
       popularity
       favourites
-    }
-  }
-}
+"""
+
+# GraphQL dotaz — stáhne tagy, studia a základní metadata přes MAL ID
+QUERY_BY_MAL_ID = f"""
+query ($idMal: Int) {{
+  Media(idMal: $idMal, type: ANIME) {{
+{_MEDIA_FIELDS}
+  }}
+}}
+"""
+
+# GraphQL dotaz pro hromadné stažení (až 50 ID najednou)
+# Anilist nemá batch endpoint pro arbitrary IDs, ale
+# můžeme stránkovat přes idMal_in.
+# POZN.: s relations/tags pro 50 titulů se dotaz blíží AniList limitu
+# složitosti -- kdyby ho někdy překročil (GraphQL chyba), get_anime_batch
+# má fallback na jednotlivé requesty, které jsou hluboko pod limitem.
+QUERY_BATCH = f"""
+query ($ids: [Int]) {{
+  Page(perPage: 50) {{
+    media(idMal_in: $ids, type: ANIME) {{
+{_MEDIA_FIELDS}
+    }}
+  }}
+}}
 """
 
 
 class AniListClient:
     def __init__(self, cache_dir: str = "cache", sleep: Callable[[float], None] = time.sleep):
         root = Path(cache_dir)
-        self._cache = FileCache(root / "anilist")     # mal_{id} media, rec_{id} recommendations
+        self._cache = FileCache(root / "anilist")     # mal_{id}_v2 media, rec_{id} recommendations
         self._cf_cache = FileCache(root / "cf_al")     # watchers_{aid}_p{n}, userlist_{uid}
         self._rate_limiter = AdaptiveRateLimiter(REQUEST_DELAY_BASE, REQUEST_DELAY_MAX, growth=1.5)
         self._sleep = sleep
@@ -162,14 +165,24 @@ class AniListClient:
             sleep=self._sleep,
         )
 
-    # ── Cache pomocník ───────────────────────────────────────────────────────
+    # ── Cache pomocníci ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _media_key(mal_id: int) -> str:
+        """Cache klíč pro Media data. Přípona _v2 = verze schématu dotazu:
+        v2 přidala genres/description/seasonYear/startDate/relations (nouzový
+        AniList-only režim). Starší mal_{id}.json soubory tahle pole nemají
+        a chybějící pole nejde rozlišit od "titul je nemá" -- proto nový
+        klíč. Staré soubory neškodně osiří; re-fetch celého seznamu jde přes
+        batch (50 titulů/request), takže stojí ~10 requestů, ne stovky."""
+        return f"mal_{mal_id}_v2"
 
     def _cached_media(self, mal_id: int) -> dict | None:
         """Poslední cachovaná AniList Media data pro `mal_id`, BEZ síťového
         volání. `None` jak pro "nikdy nezkoušeno", tak pro "potvrzeně
         nenalezeno" -- volající, kterým na rozdílu nezáleží (CF příprava,
         popularita), tak nemusí znát tvar cache envelope."""
-        envelope = self._cache.get(f"mal_{mal_id}")
+        envelope = self._cache.get(self._media_key(mal_id))
         if envelope is None or not envelope["found"]:
             return None
         return envelope["data"]
@@ -186,7 +199,7 @@ class AniListClient:
         případech nemá co vrátit); rozdíl je jen v tom, že první případ se
         cachuje natrvalo a druhý ne (zkusí se znovu příště).
         """
-        return cached_fetch(self._cache, f"mal_{mal_id}", lambda: self._fetch_media(mal_id))
+        return cached_fetch(self._cache, self._media_key(mal_id), lambda: self._fetch_media(mal_id))
 
     def _fetch_media(self, mal_id: int) -> Result:
         result = self._request(QUERY_BY_MAL_ID, {"idMal": mal_id})
@@ -219,7 +232,7 @@ class AniListClient:
         # cachováno a nalezeno (-> results), cachováno jako potvrzeně
         # nenalezeno (-> ani results, ani uncached, definitivně vyřešeno).
         for mal_id in mal_ids:
-            envelope = self._cache.get(f"mal_{mal_id}")
+            envelope = self._cache.get(self._media_key(mal_id))
             if envelope is not None:
                 if envelope["found"]:
                     results[mal_id] = envelope["data"]
@@ -256,7 +269,7 @@ class AniListClient:
                     data = self.get_anime(mal_id)
                     if data:
                         results[mal_id] = data
-                    elif self._cache.get(f"mal_{mal_id}") is None:
+                    elif self._cache.get(self._media_key(mal_id)) is None:
                         batch_failed += 1  # stále nestažené (request selhal)
                 if batch_failed:
                     log.warning(
@@ -272,14 +285,14 @@ class AniListClient:
             for media in media_list:
                 mid = media.get("idMal")
                 if mid:
-                    self._cache.set(f"mal_{mid}", {"found": True, "data": media})
+                    self._cache.set(self._media_key(mid), {"found": True, "data": media})
                     results[mid] = media
                     fetched_mal_ids.add(mid)
 
             # Ulož sentinel pro nenalezená
             for mal_id in batch:
                 if mal_id not in fetched_mal_ids:
-                    self._cache.set(f"mal_{mal_id}", {"found": False, "data": None})
+                    self._cache.set(self._media_key(mal_id), {"found": False, "data": None})
 
         if show_progress and uncached:
             progress_done(f"  AniList staženo: {len(results)}/{len(mal_ids)} titulů.")
@@ -429,6 +442,27 @@ class AniListClient:
         isGeneralSpoiler
       }
     }"""
+
+    # Žánry jsou u AniListu ODDĚLENĚ od tagů (Media.genres je [String] a
+    # MediaTagCollection je neobsahuje) -- bez tohohle dotazu by universum
+    # v AniList-only režimu (--no-jikan) nemělo comedy/drama/horror/...,
+    # tedy nejsilnější klíče celé osy náročnosti.
+    GENRE_COLLECTION_QUERY = """
+    query { GenreCollection }
+    """
+
+    def get_genre_collection(self) -> list[str]:
+        """Úplný seznam AniList žánrů (~18 stringů). Cachováno pod klíčem
+        "genre_collection" (stejná logika jako tag_collection)."""
+        out = cached_fetch(self._cache, "genre_collection", self._fetch_genre_collection)
+        return out if out is not None else []
+
+    def _fetch_genre_collection(self) -> Result:
+        result = self._request(self.GENRE_COLLECTION_QUERY, {})
+        if not result.ok:
+            return result
+        genres = (result.data.get("data") or {}).get("GenreCollection") or []
+        return Result.success(genres)
 
     def get_tag_collection(self) -> list[dict]:
         """Úplný seznam AniList tagů (~350) s popisem a kategorií. Cachováno

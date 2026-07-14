@@ -49,10 +49,20 @@ def run(args) -> int:
         cfg.cache_dir = args.cache
     if args.no_anilist:
         cfg.enrich.use_anilist = False
+    if args.no_jikan:
+        cfg.enrich.use_jikan = False
     if args.shrinkage is not None:
         cfg.model.shrinkage_k = args.shrinkage
     if args.user_cf:
         cfg.recommend.use_user_cf = True
+
+    if not cfg.enrich.use_jikan and not cfg.enrich.use_anilist:
+        print("[chyba] --no-jikan a --no-anilist zároveň = žádný zdroj metadat",
+              file=sys.stderr)
+        return 2
+    if not cfg.enrich.use_jikan:
+        print("[pozn.] Nouzový režim bez Jikanu: žánry/synopse/dekáda/franšízy "
+              "z AniListu, bez MAL rec grafu (slabší CF signál).")
 
     if not os.path.exists(cfg.mal_export):
         print(f"[chyba] MAL export nenalezen: {cfg.mal_export}", file=sys.stderr)
@@ -70,11 +80,13 @@ def run(args) -> int:
     if args.analyze:
         from .series import print_series_groups
         enr = Enricher(cfg)
-        # print_series_groups potřebuje jen Jikan data (relations), ne AniList --
-        # cachované z předchozích běhů, takže tohle typicky nic nestahuje naživo
-        jdata = enr.jikan.get_anime_batch([e.mal_id for e in completed], show_progress=True)
-        titles_map = {mid: (j or {}).get("title", str(mid)) for mid, j in jdata.items()}
-        print_series_groups(completed, jdata, titles_map)
+        # Relations přes Enricher.relations_data -- primárně Jikan, per-titul
+        # fallback AniList, takže --analyze funguje i v --no-jikan režimu.
+        # Po normálním běhu jde vše z cache, nic se nestahuje naživo.
+        enriched = enr.enrich_ids([e.mal_id for e in completed], show_progress=True)
+        rel_data = enr.relations_data(enriched)
+        titles_map = {mid: en.title for mid, en in enriched.items()}
+        print_series_groups(completed, rel_data, titles_map)
         return 0
 
     if args.gen_intensity:
@@ -221,6 +233,10 @@ def main(argv=None) -> int:
     p.add_argument("--cache", help="složka cache (default: cache)")
     p.add_argument("--shrinkage", type=float, help="přepiš shrinkage K")
     p.add_argument("--no-anilist", action="store_true", help="použij jen Jikan/MAL")
+    p.add_argument("--no-jikan", action="store_true",
+                   help="nouzový AniList-only režim (např. při výpadku Jikan "
+                        "API): žánry/synopse/dekáda/franšízy z AniListu, "
+                        "MAL rec graf se přeskočí")
     p.add_argument("--no-recommend", action="store_true", help="jen model, bez doporučení")
     p.add_argument("--user-cf", action="store_true", help="zapni user-based CF (pomalé)")
     p.add_argument("--analyze", action="store_true",

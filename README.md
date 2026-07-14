@@ -27,6 +27,7 @@ python -m animodel -e animelist.xml -o vystup         # jiná výstupní složka
 python -m animodel -e animelist.xml --cache muj_cache # jiná cache složka (default: cache)
 python -m animodel -e animelist.xml --no-recommend   # jen model
 python -m animodel -e animelist.xml --no-anilist     # jen MAL/Jikan
+python -m animodel -e animelist.xml --no-jikan       # nouzový AniList-only režim (výpadek Jikanu)
 python -m animodel -e animelist.xml --shrinkage 12   # konzervativnější efekty
 python -m animodel -e animelist.xml --user-cf        # + user-based CF (pomalé)
 python -m animodel -e animelist.xml --analyze        # jen přehled franšízových skupin, bez modelu
@@ -40,6 +41,17 @@ První běh je pomalejší (stahuje metadata přes Jikan a AniList); vše se cac
 do `cache/`, takže další běhy jsou rychlé. Default log level je WARNING (jen
 skutečné problémy); `--verbose` přidá INFO úroveň s běžnými retry/rate-limit
 zprávami, které jinak nejsou vidět.
+
+### Nouzový režim bez Jikanu
+
+Jikan (neoficiální MAL API) mívá výpadky, kdy většina requestů vrací 504 —
+každý necachovaný titul pak stojí ~17 s marného čekání. `--no-jikan` (nebo
+`enrich.use_jikan: false` v configu) přepne na čistě AniList data: žánry,
+synopse, dekáda i franšízové vazby se vezmou z AniListu, komunitní skóre
+z `averageScore`. Degradace je malá a ohraničená: chybí MAL recommendations
+graf (CF signál stojí jen na AniList-rec + tag-search) a volitelný staff
+signál. Stejné fallbacky fungují i per-titul v běžném režimu — když Jikan
+selže jen pro některé tituly, doplní se z AniListu automaticky.
 
 ---
 
@@ -103,6 +115,12 @@ Při regeneraci se tvé úpravy **vždy zachovají** — doplní se jen nové kl
 (např. tagy, které AniList přidal později; model je po fitu sám vypíše jako
 „bez záznamu v lexikonu"). Bez souboru běží vestavěný default.
 
+**Spoiler tagy** (AniList `isGeneralSpoiler`/`isMediaSpoiler` — Tragedy,
+Tearjerker, …) vstupují do modelu normálně; jsou to nejsilnější signály osy
+náročnosti. V HTML reportech nesou příznak a přepínač vpravo nahoře
+(„spoiler tagy") je umí jedním klikem skrýt. Adult tagy zůstávají vyloučené
+úplně.
+
 ---
 
 ## Doporučení
@@ -151,6 +169,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |
 | `recommend.high_score` | od jaké známky je titul „seed" |
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |
+| `enrich.use_jikan` | vypni pro nouzový AniList-only režim (viz `--no-jikan`) |
 | `enrich.include_staff` | signál po režisérech/scenáristech (+1 Jikan volání/titul, default vypnuto) |
 | `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (naživo neověřeno, default vypnuto) |
 | `recommend.use_user_cf*` | user-based CF přes AniList a jeho ladění (viz `--user-cf`, dražší/pomalejší) |

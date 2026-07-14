@@ -56,7 +56,7 @@ class Recommendation:
     composite: float
     ptw: bool
     cluster_name: str
-    why: list                # [(label, category, contribution), ...] seřazeno
+    why: list                # [(label, category, contribution, spoiler), ...] seřazeno
     cf_seeds: list           # názvy seedů, které tenhle titul "doporučily"
     synopsis: str = ""
     sources: list = field(default_factory=list)   # ['MAL-rec', 'AniList-rec', 'tag-search']
@@ -157,14 +157,16 @@ class Recommender:
 
         # A1) item-based CF graf z MAL + AniList + Shikimori recommendations
         for s in seeds:
-            recs = call_source("MAL-rec", lambda s=s: self.enr.jikan.get_recommendations(s.mal_id))
-            # candidates_per_seed byl definovaný v configu, ale nikde se
-            # nečetl -- změna hodnoty v config.yaml neměla žádný efekt.
-            for r in recs[: self.rc.candidates_per_seed]:
-                # váž hlasy podle toho, jak moc seed miluju (user_score nad průměr)
-                w = max(0.1, s.user_score - self.model.u_mean + 1.0)
-                bump(r["mal_id"], (1 + math.log1p(r.get("votes", 0))) * w,
-                     seed_title_by_id.get(s.mal_id), "MAL-rec")
+            # Jikan může být vypnutý (--no-jikan, nouzový AniList-only režim)
+            if self.enr.jikan:
+                recs = call_source("MAL-rec", lambda s=s: self.enr.jikan.get_recommendations(s.mal_id))
+                # candidates_per_seed byl definovaný v configu, ale nikde se
+                # nečetl -- změna hodnoty v config.yaml neměla žádný efekt.
+                for r in recs[: self.rc.candidates_per_seed]:
+                    # váž hlasy podle toho, jak moc seed miluju (user_score nad průměr)
+                    w = max(0.1, s.user_score - self.model.u_mean + 1.0)
+                    bump(r["mal_id"], (1 + math.log1p(r.get("votes", 0))) * w,
+                         seed_title_by_id.get(s.mal_id), "MAL-rec")
 
             if self.enr.anilist:
                 recs = call_source("AniList-rec", lambda s=s: self.enr.anilist.get_recommendations(s.mal_id))

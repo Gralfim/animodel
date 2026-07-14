@@ -26,6 +26,10 @@ class ModelCfg:
 
 @dataclass
 class EnrichCfg:
+    use_jikan: bool = True            # False = nouzový AniList-only režim
+                                       # (--no-jikan): žánry/synopse/dekáda/
+                                       # franšízy se berou z AniListu, MAL rec
+                                       # graf se přeskočí. Pro výpadky Jikanu.
     use_anilist: bool = True
     anilist_min_rank: int = 30        # ignoruj okrajové AniList tagy (rank < 30 %)
     include_studios: bool = True

@@ -131,7 +131,17 @@ tr:last-child td{{border-bottom:none}}
 footer{{margin-top:80px;padding-top:20px;border-top:1px solid rgba(236,228,214,.1);
   color:var(--mut);font-size:12.5px;font-family:'Spline Sans Mono',monospace}}
 a{{color:var(--acc)}}
-</style></head><body><div class="wrap">"""
+.spoiltoggle{{position:fixed;top:14px;right:18px;z-index:9;cursor:pointer;
+  font-family:'Spline Sans Mono',monospace;font-size:12px;color:var(--mut);
+  background:var(--panel);border:1px solid rgba(236,228,214,.14);
+  border-radius:999px;padding:6px 14px;user-select:none}}
+.spoiltoggle input{{vertical-align:middle;margin-right:6px;accent-color:{ACCENT}}}
+body.nospoil .spoiler-item{{display:none}}
+</style></head><body>
+<label class="spoiltoggle" title="AniList spoiler-flagged tagy (Tragedy, Tearjerker, …) — odškrtni pro skrytí">
+<input type="checkbox" checked
+ onchange="document.body.classList.toggle('nospoil',!this.checked)">spoiler tagy</label>
+<div class="wrap">"""
 
 
 def _foot(extra: str = "") -> str:
@@ -215,8 +225,9 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         for e in items:
             cls = "pos" if e.effect >= 0 else "neg"
             col = ACCENT if e.effect >= 0 else NEG
+            spoil = ' class="spoiler-item"' if getattr(e, "spoiler", False) else ""
             rows.append(
-                f'<tr><td>{_esc(e.label)}</td>'
+                f'<tr{spoil}><td>{_esc(e.label)}</td>'
                 f'<td><span class="tag cat-{_esc(e.category)}">{_esc(e.category)}</span></td>'
                 f'<td class="mono {cls}">{e.effect:+.2f}</td>'
                 f'<td class="mono">{e.distinct:+.2f}</td>'
@@ -252,8 +263,9 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
             pill = f'<span class="pill light">lehké · {c.intensity:+.2f}</span>'
         else:
             pill = f'<span class="pill mix">smíšené · {c.intensity:+.2f}</span>'
-        sig = "".join(f'<span class="tag cat-{_esc(cat)}">{_esc(lab)}</span>'
-                      for _key, lab, cat, _dist in c.signature[:6])
+        sig = "".join(
+            f'<span class="tag cat-{_esc(cat)}{" spoiler-item" if spoil else ""}">{_esc(lab)}</span>'
+            for _key, lab, cat, _dist, spoil in c.signature[:6])
         mem = " · ".join(_esc(m[1]) for m in c.members[:6])
         parts.append(
             f'<div class="cl"><div class="name">{_esc(c.name)}</div>'
@@ -303,9 +315,10 @@ def _rec_card(r, rank: int) -> str:
            if r.title_en and r.title_en != r.title else "")
     flag = '<span class="flag">na tvém PTW</span>' if r.ptw else ""
     why_parts = []
-    for lab, cat, val in r.why:
+    for lab, cat, val, spoil in r.why:
         sign = "pos" if val >= 0 else "neg"
-        why_parts.append(f'<span class="{sign}">{_esc(lab)}</span>')
+        cls = f"{sign} spoiler-item" if spoil else sign
+        why_parts.append(f'<span class="{cls}">{_esc(lab)}</span>')
     why = ", ".join(why_parts) if why_parts else "—"
     seeds = ""
     if r.cf_seeds:
@@ -444,8 +457,8 @@ def render_cluster_recommendations_html(
             else:
                 pill = f'<span class="pill mix">smíšené · {meta.intensity:+.2f}</span>'
             sig = "".join(
-                f'<span class="tag cat-{_esc(cat)}">{_esc(lab)}</span>'
-                for _key, lab, cat, _dist in meta.signature[:6]
+                f'<span class="tag cat-{_esc(cat)}{" spoiler-item" if spoil else ""}">{_esc(lab)}</span>'
+                for _key, lab, cat, _dist, spoil in meta.signature[:6]
             )
             meta_html = (
                 f'<div class="meta">'
@@ -547,9 +560,10 @@ def _cf_rec_card(r_cf: dict, enr, rank: int) -> str:
     why_html = ""
     if enr and enr.why:
         why_parts = []
-        for lab, cat, val in enr.why:
+        for lab, cat, val, spoil in enr.why:
             sign = "pos" if val >= 0 else "neg"
-            why_parts.append(f'<span class="{sign}">{_esc(lab)}</span>')
+            cls = f"{sign} spoiler-item" if spoil else sign
+            why_parts.append(f'<span class="{cls}">{_esc(lab)}</span>')
         why = ", ".join(why_parts)
         cl  = f'<span class="tag">{_esc(enr.cluster_name)}</span>' if enr.cluster_name else ""
         why_html = f'<div class="why"><b>Pro\u010d:</b> {why} &nbsp;{cl}</div>'

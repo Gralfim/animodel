@@ -212,8 +212,11 @@ def build_universe(jikan=None, anilist=None) -> list[dict]:
     podle klíče (MAL má přednost — je menší a tvoří jádro; stejný koncept
     z AniListu by stejně dostal tentýž canon klíč).
 
-    isAdult a isGeneralSpoiler tagy se vynechávají — build_attributes() je
-    zahazuje taky, takže by v lexikonu nikdy nic netrefily.
+    isAdult tagy se vynechávají — build_attributes() je zahazuje taky,
+    takže by v lexikonu nikdy nic netrefily. Spoiler tagy (isGeneralSpoiler)
+    se naopak ZAHRNUJÍ: build_attributes je od 2026-07 pouští do modelu
+    s příznakem (report je umí skrýt) a pro osu náročnosti jsou to
+    nejsilnější signály vůbec (Tragedy, Tearjerker, ...).
     """
     universe: list[dict] = []
     seen: set[str] = set()
@@ -238,10 +241,16 @@ def build_universe(jikan=None, anilist=None) -> list[dict]:
                 add(t["name"], "MAL: témata")
 
     if anilist is not None:
+        # Žánry zvlášť -- MediaTagCollection je neobsahuje (Media.genres je
+        # samostatné pole) a bez nich by v AniList-only režimu chyběly
+        # comedy/drama/horror/... = nejsilnější klíče osy náročnosti.
+        for g in anilist.get_genre_collection():
+            if g:
+                add(g, "AniList: žánry")
         for tag in anilist.get_tag_collection():
             if not tag.get("name"):
                 continue
-            if tag.get("isAdult") or tag.get("isGeneralSpoiler"):
+            if tag.get("isAdult"):
                 continue
             cat = tag.get("category") or "ostatní"
             add(tag["name"], f"AniList: {cat}",
@@ -289,9 +298,9 @@ def generate_lexicon(out_path: str | Path, jikan=None, anilist=None,
         stats["zero"] += 1
         return 0.0
 
-    # Skupiny ve stabilním pořadí: MAL žánry, MAL témata, pak AniList
-    # kategorie abecedně
-    _fixed = {"MAL: žánry": 0, "MAL: témata": 1}
+    # Skupiny ve stabilním pořadí: MAL žánry, MAL témata, AniList žánry,
+    # pak AniList tag kategorie abecedně
+    _fixed = {"MAL: žánry": 0, "MAL: témata": 1, "AniList: žánry": 2}
     groups: dict[str, list[dict]] = {}
     for entry in universe:
         groups.setdefault(entry["group"], []).append(entry)

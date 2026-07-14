@@ -17,6 +17,8 @@ model:
                             # a hodnoty uprav; bez souboru se použije vestavěný default
 
 enrich:
+  use_jikan: true           # false = nouzový AniList-only režim (viz --no-jikan);
+                            # hodí se při výpadku Jikan API
   use_anilist: true
   anilist_min_rank: 30      # ignoruj okrajové AniList tagy (rank < 30 %)
   include_studios: true

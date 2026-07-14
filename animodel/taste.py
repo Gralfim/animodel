@@ -83,6 +83,7 @@ class AttrEffect:
     distinct: float       # o kolik to hodnotím výš než komunita (user−community)
     titles_pos: list      # příklady titulů s nejvyšší afinitou
     titles_neg: list
+    spoiler: bool = False # tag je na AniListu spoiler-flagged (report ho umí skrýt)
 
 
 @dataclass
@@ -101,7 +102,7 @@ class Cluster:
     size: int
     mean_user_score: float
     intensity: float                 # −1 (lehké) … +1 (náročné)
-    signature: list                  # [(key, label, category, distinctiveness), ...]
+    signature: list                  # [(key, label, category, distinctiveness, spoiler), ...]
     members: list                    # [(mal_id, title, user_score), ...] seřazeno
 
 
@@ -222,7 +223,7 @@ class TasteModel:
             self.effects[key] = AttrEffect(
                 key=key, label=meta[key].label, category=meta[key].category,
                 n_eff=n_eff, raw_mean=raw, effect=shrunk, distinct=distinct,
-                titles_pos=pos, titles_neg=neg,
+                titles_pos=pos, titles_neg=neg, spoiler=meta[key].spoiler,
             )
 
     def _fit_interactions(self):
@@ -313,7 +314,10 @@ class TasteModel:
     def predict(self, attrs: dict[str, AttrValue], community: float | None):
         """
         Vrátí (predikce, dolní, horní, příspěvky) pro daný titul.
-        příspěvky = seřazený list (label, category, value) pro vysvětlení.
+        příspěvky = seřazený list (label, category, value, spoiler) pro
+        vysvětlení; spoiler=True znamená, že tag je na AniListu
+        spoiler-flagged (obecně, nebo pro TENHLE konkrétní titul) a report
+        ho umí přepínačem skrýt.
         """
         base = self._baseline_pred(community)
         raw = self._raw_resid_pred(attrs)
@@ -326,11 +330,14 @@ class TasteModel:
         for key, av in attrs.items():
             e = self.effects.get(key)
             if e and abs(e.effect) > 1e-6:
-                contribs.append((e.label, e.category, self.scale * e.effect * av.weight))
+                contribs.append((e.label, e.category,
+                                 self.scale * e.effect * av.weight,
+                                 av.spoiler or e.spoiler))
         present = set(attrs)
         for it in self.interactions:
             if it.a in present and it.b in present:
-                contribs.append((it.label, "interakce", self.scale * it.lift))
+                spoil = (self.effects[it.a].spoiler or self.effects[it.b].spoiler)
+                contribs.append((it.label, "interakce", self.scale * it.lift, spoil))
         contribs.sort(key=lambda x: -abs(x[2]))
         return pred, lo, hi, contribs
 
@@ -432,7 +439,8 @@ class TasteModel:
                 # měly stejný label i kategorii.
                 signature.append((key, self.effects[key].label,
                                   self.effects[key].category,
-                                  float(distinct[si])))
+                                  float(distinct[si]),
+                                  self.effects[key].spoiler))
             mem = sorted(
                 [(meta[i].mal_id, meta[i].title, meta[i].user_score) for i in members_i],
                 key=lambda x: -x[2])

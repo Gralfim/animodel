@@ -4,10 +4,18 @@ enrich.py — Z MAL ID na obohacené Title objekty.
 Stáhne (a cachuje) metadata z Jikan + AniList, sloučí atributy přes
 attributes.build_attributes, doplní komunitní baseline a — volitelně —
 zváží franšízy, aby sequel/prequel nepočítaly jako N nezávislých bodů.
+
+Nouzový režim (--no-jikan / enrich.use_jikan: false): Jikan klient se vůbec
+nevytvoří a všechno, co jinak dodává (žánry, synopse, dekáda, franšízové
+vazby), se bere z AniListu -- viz build_attributes fallbacky a
+_relations_from_anilist níž. Stejné fallbacky fungují i per-titul v běžném
+režimu, když Jikan pro konkrétní titul dočasně selže.
 """
 from __future__ import annotations
 
+import html
 import math
+import re
 from dataclasses import dataclass
 
 from .attributes import build_attributes, community_baseline, AttrValue
@@ -16,6 +24,49 @@ from .sources.jikan import JikanClient
 from .sources.anilist import AniListClient
 from .sources.shikimori import ShikimoriClient
 from .series import build_series_groups
+
+
+# AniList relationType → Jikan název relace (jen typy, které series.py
+# skutečně slučuje -- viz SERIES_RELATION_TYPES; zbytek nemá smysl mapovat).
+_ANILIST_RELATION = {
+    "SEQUEL": "sequel",
+    "PREQUEL": "prequel",
+    "ALTERNATIVE": "alternative version",
+    "SIDE_STORY": "side story",
+}
+
+
+def _relations_from_anilist(media: dict | None) -> dict | None:
+    """
+    Adaptér: AniList `relations.edges` → Jikan tvar {"relations": [...]},
+    aby series.py (union-find franšíz) zůstal beze změny a fungoval nad
+    kterýmkoli zdrojem. Ne-anime uzly (manga předloha apod.) a uzly bez
+    MAL ID se vynechávají.
+    """
+    edges = ((media or {}).get("relations") or {}).get("edges") or []
+    rels = []
+    for edge in edges:
+        rtype = _ANILIST_RELATION.get(edge.get("relationType"))
+        node = edge.get("node") or {}
+        if not rtype or node.get("type") != "ANIME" or not node.get("idMal"):
+            continue
+        rels.append({"relation": rtype,
+                     "entry": [{"mal_id": node["idMal"], "type": "anime"}]})
+    return {"relations": rels} if rels else None
+
+
+def _clean_anilist_description(text: str) -> str:
+    """AniList description je HTML-ish (<br>, <i>, &amp;) a obsahuje
+    ~!spoiler!~ bloky -- pro report potřebujeme čistý text bez spoilerů."""
+    if not text:
+        return ""
+    text = re.sub(r"~!.*?!~", "", text, flags=re.S)      # spoiler bloky pryč
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)  # <br> → nový řádek
+    text = re.sub(r"<[^>]+>", "", text)                   # zbylé tagy pryč
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 @dataclass
@@ -34,19 +85,21 @@ class Enricher:
     def __init__(self, cfg, jikan: JikanClient = None, anilist: AniListClient = None,
                  shikimori: ShikimoriClient = None):
         self.cfg = cfg
-        self.jikan = jikan or JikanClient(cfg.cache_dir)
+        self.jikan = jikan or (JikanClient(cfg.cache_dir) if cfg.enrich.use_jikan else None)
         self.anilist = anilist or (AniListClient(cfg.cache_dir) if cfg.enrich.use_anilist else None)
         self.shikimori = shikimori or (
             ShikimoriClient(f"{cfg.cache_dir}/shikimori") if cfg.enrich.use_shikimori else None
         )
 
     def enrich_ids(self, mal_ids: list[int], show_progress=True) -> dict[int, Enriched]:
-        jdata = self.jikan.get_anime_batch(mal_ids, show_progress=show_progress)
+        jdata = {}
+        if self.jikan:
+            jdata = self.jikan.get_anime_batch(mal_ids, show_progress=show_progress)
         adata = {}
         if self.anilist:
             adata = self.anilist.get_anime_batch(mal_ids, show_progress=show_progress)
         sdata = {}
-        if self.cfg.enrich.include_staff:
+        if self.cfg.enrich.include_staff and self.jikan:
             sdata = self.jikan.get_staff_batch(mal_ids, show_progress=show_progress)
 
         out = {}
@@ -68,11 +121,29 @@ class Enricher:
             if not title_en and j:
                 title_en = j.get("title_english") or ""
             syn = (j or {}).get("synopsis") or ""
+            if not syn and a:
+                syn = _clean_anilist_description(a.get("description") or "")
             out[mid] = Enriched(
                 mal_id=mid, title=title, title_en=title_en,
                 community=community_baseline(j, a), attrs=attrs,
                 synopsis=syn, jikan=j, anilist=a,
             )
+        return out
+
+    def relations_data(self, enriched: dict[int, Enriched]) -> dict[int, dict]:
+        """
+        Franšízové vazby v Jikan tvaru pro series.py -- primárně z Jikan dat,
+        per-titul fallback na AniList relations (adaptér výš). Vrací jen
+        tituly, pro které nějaké vazby známe.
+        """
+        out = {}
+        for mid, e in enriched.items():
+            if e.jikan and e.jikan.get("relations"):
+                out[mid] = e.jikan
+            else:
+                rel = _relations_from_anilist(e.anilist)
+                if rel:
+                    out[mid] = rel
         return out
 
     def build_titles(self, mal_entries, show_progress=True) -> list[Title]:
@@ -85,8 +156,11 @@ class Enricher:
 
         weight = {mid: 1.0 for mid in ids}
         if self.cfg.model.aggregate_franchises:
-            jfull = {mid: e.jikan for mid, e in enr.items() if e.jikan}
-            groups = build_series_groups(list(jfull.keys()), jfull)
+            rel_data = self.relations_data(enr)
+            # id_set = všechny obohacené tituly (ne jen ty s vlastními
+            # relations) -- titul bez vazeb pořád může být cílem vazby
+            # od jiného člena franšízy.
+            groups = build_series_groups(list(enr.keys()), rel_data)
             for root, members in groups.items():
                 k = len(members)
                 if k > 1:
