@@ -417,6 +417,34 @@ class AniListClient:
         # doporučení, ne nejistotu, takže je bezpečné to natrvalo zacachovat.
         return Result.success(out)
 
+    # Kompletní seznam všech AniList tagů (name, description, category) --
+    # universum pro intensity lexikon (viz animodel/intensity.py).
+    TAG_COLLECTION_QUERY = """
+    query {
+      MediaTagCollection {
+        name
+        description
+        category
+        isAdult
+        isGeneralSpoiler
+      }
+    }"""
+
+    def get_tag_collection(self) -> list[dict]:
+        """Úplný seznam AniList tagů (~350) s popisem a kategorií. Cachováno
+        pod klíčem "tag_collection" -- universum se mění jen když AniList
+        přidá nový tag (vzácně); pro vynucené obnovení smaž
+        cache/anilist/tag_collection.json."""
+        out = cached_fetch(self._cache, "tag_collection", self._fetch_tag_collection)
+        return out if out is not None else []
+
+    def _fetch_tag_collection(self) -> Result:
+        result = self._request(self.TAG_COLLECTION_QUERY, {})
+        if not result.ok:
+            return result
+        tags = (result.data.get("data") or {}).get("MediaTagCollection") or []
+        return Result.success(tags)
+
     TAG_SEARCH = """
     query ($tags: [String], $page: Int) {
       Page(page: $page, perPage: 50) {

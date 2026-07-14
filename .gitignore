@@ -16,6 +16,7 @@ output
 output_backup
 animelist.xml
 config.yaml
+intensity.yaml
 
 # IDE
 .vscodesettings.json

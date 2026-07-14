@@ -12,6 +12,9 @@ model:
   interaction_min_lift: 0.30
   n_clusters: null          # null = auto podle siluety (4–7); nebo napevno např. 5
   aggregate_franchises: true
+  intensity_lexicon: intensity.yaml  # osa náročnosti (-1 lehké … +1 těžké);
+                            # vygeneruj: python -m animodel -e export.xml --gen-intensity
+                            # a hodnoty uprav; bez souboru se použije vestavěný default
 
 enrich:
   use_anilist: true

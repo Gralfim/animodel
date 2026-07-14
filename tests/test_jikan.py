@@ -121,6 +121,17 @@ def test_connection_error_exhausts_retries_and_is_not_cached(tmp_path, no_sleep)
     assert get.calls == attempts
 
 
+def test_get_genres_unwraps_data_and_caches(tmp_path, no_sleep):
+    genres = [{"mal_id": 4, "name": "Comedy"}, {"mal_id": 8, "name": "Drama"}]
+    resp = FakeResponse(200, {"data": genres})
+    client, get = make_client(tmp_path, [resp], no_sleep)
+
+    assert client.get_genres("genres") == genres
+    assert get.calls == 1
+    assert client.get_genres("genres") == genres   # z cache
+    assert get.calls == 1
+
+
 def test_get_recommendations_unwraps_entries(tmp_path, no_sleep):
     resp = FakeResponse(200, {"data": [
         {"entry": {"mal_id": 5, "title": "Y"}, "votes": 12},

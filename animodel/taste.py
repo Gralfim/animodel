@@ -48,35 +48,17 @@ from dataclasses import dataclass, field
 from .attributes import AttrValue
 
 
-# ── Lexikon "emocionální náročnosti" (osa únavy) ────────────────────────────
+# ── Osa "emocionální náročnosti" (osa únavy) ────────────────────────────────
 # Reziduum říká CO mám rád; tahle osa říká, jak je daný titul EMOČNĚ náročný,
 # aby šlo doporučení filtrovat podle aktuální nálady / únavy.
 #
-# POZN. (code review, 2026): tohle je ručně udržovaný seznam, což je přesně
-# to, co si zbytek `attributes.py` explicitně zakazuje jako princip. Nechávám
-# ho -- osa náročnosti potřebuje NĚJAKÝ prior, který z dat samotných nejde
-# odvodit stejně čistě jako "co mám rád" -- ale položky jsem přes web search
-# ověřil proti reálné AniList tagové/žánrové taxonomii, kde to šlo.
-# Přímo potvrzené (AniList tag nebo genre): tragedy, survival, war, politics,
-# philosophy, suicide, gore, bullying, dystopian, psychological, horror,
-# thriller, drama, military, suspense (MAL genre, ne AniList, ale platí stejně).
-# NEpotvrzené, ponechané jako best-guess (běžné koncepty, ale nenašel jsem
-# přímý důkaz): death, depression, crime. Odstraněno bez náhrady (žádný důkaz
-# a riziko, že v `canon()` výstupu nikdy nic netrefí): "loss", "grief",
-# "existential", "trauma", "mature_themes", "organized_crime".
-# Použij `TasteModel.unmatched_intensity_keywords()` po reálném fit() -- řekne
-# přesně, co z týhle sady v tvých datech nikdy nic netrefilo, ať se časem dá
-# doladit podle skutečnosti, ne odhadu (můj i cizí).
-HEAVY = {
-    "drama", "tragedy", "psychological", "gore", "war", "military", "death",
-    "suspense", "thriller", "philosophy", "bullying", "suicide", "depression",
-    "dystopian", "survival", "horror", "politics", "crime",
-}
-LIGHT = {
-    "comedy", "slice_of_life", "cute_girls_doing_cute_things", "healing",
-    "gag_humor", "parody", "slapstick", "gourmet", "surreal_comedy",
-    "school_comedy", "kids", "chibi", "anthropomorphic", "iyashikei",
-}
+# Dřívější ručně vypsané HEAVY/LIGHT množiny (binární, odhadované klíče --
+# viz HODNOCENI_PROJEKTU.md §7.2) nahradil spojitý lexikon {klíč: −1..+1}
+# v animodel/intensity.py: množina klíčů se generuje exaktně z AniList
+# MediaTagCollection + Jikan /genres/anime (`--gen-intensity` → intensity.yaml),
+# hodnoty jsou revidovatelné v jednom souboru. Dokud soubor neexistuje,
+# použije se vestavěný DEFAULT_LEXICON (prefill stejných hodnot).
+from .intensity import DEFAULT_LEXICON
 
 
 @dataclass
@@ -130,11 +112,15 @@ class TasteModel:
         min_attr_count: float = 3.0,
         interaction_min_count: float = 6.0,
         interaction_min_lift: float = 0.25,
+        intensity: dict[str, float] | None = None,
     ):
         self.K = shrinkage_k
         self.min_attr_count = min_attr_count
         self.int_min_count = interaction_min_count
         self.int_min_lift = interaction_min_lift
+        # Lexikon osy náročnosti {canon_klíč: −1..+1}; None = vestavěný
+        # default (viz intensity.py). cli.py sem předává load_lexicon(...).
+        self.intensity = intensity if intensity is not None else DEFAULT_LEXICON
 
         self.titles: list[Title] = []
         self.b0: float = 0.0
@@ -209,9 +195,15 @@ class TasteModel:
 
         # Všechny pozorované klíče, i pod min_attr_count -- effects (níž) filtruje
         # na "dost důkazů pro fitnutý efekt", ale intensity_of() atributy čte
-        # přímo z Title.attrs bez ohledu na to. Diagnostika HEAVY/LIGHT proto
-        # musí kontrolovat proti TOMHLE, ne proti self.effects.keys().
+        # přímo z Title.attrs bez ohledu na to. Diagnostika lexikonu
+        # (unrated_intensity_attrs) proto kontroluje proti TOMHLE, ne proti
+        # self.effects.keys(). Metadata + efektivní počty se uchovávají kvůli
+        # řazení diagnostiky podle důležitosti.
         self.all_attr_keys: set[str] = set(bucket.keys())
+        self.all_attrs: dict[str, AttrValue] = dict(meta)
+        self.attr_counts: dict[str, float] = {
+            key: sum(w for _, w, _ in rows) for key, rows in bucket.items()
+        }
 
         self.effects = {}
         for key, rows in bucket.items():
@@ -343,11 +335,23 @@ class TasteModel:
         return pred, lo, hi, contribs
 
     def intensity_of(self, attrs: dict[str, AttrValue]) -> float:
-        h = sum(av.weight for k, av in attrs.items() if k in HEAVY)
-        l = sum(av.weight for k, av in attrs.items() if k in LIGHT)
-        if h + l == 0:
-            return 0.0
-        return (h - l) / (h + l)
+        """
+        Vážený průměr lexikonových skóre přítomných atributů ∈ [−1, +1].
+
+        Klíče s hodnotou 0.0 (neutrální) nebo mimo lexikon se přeskakují --
+        neředí výsledek, stejná sémantika jako dřívější nečlenství v
+        HEAVY/LIGHT. Při lexikonu s hodnotami ±1 dává přesně starý vzorec
+        (h − l)/(h + l); spojité hodnoty ho zjemňují.
+        """
+        num = 0.0
+        den = 0.0
+        for key, av in attrs.items():
+            s = self.intensity.get(key, 0.0)
+            if not s:
+                continue
+            num += av.weight * s
+            den += av.weight
+        return num / den if den else 0.0
 
     def _global_user_mean(self) -> float:
         return self._weighted_mean([(t.user_score, t.weight) for t in self.titles])
@@ -459,20 +463,26 @@ class TasteModel:
             items = [e for e in items if e.effect < 0]
         return sorted(items, key=lambda e: -abs(e.effect))[:n]
 
-    def unmatched_intensity_keywords(self) -> dict[str, list[str]]:
+    def unrated_intensity_attrs(self, top: int | None = None) -> list[tuple[str, str, float]]:
         """
-        Diagnostika HEAVY/LIGHT lexikonu (viz komentář výše): vrátí, které
-        klíče z něj se v datech tohoto uživatele NIKDY neobjevily jako
-        pozorovaný atribut (tj. `canon()` je nikdy netrefil). Volej AŽ PO
-        fit() -- potřebuje self.effects postavené z reálných dat.
+        Diagnostika intensity lexikonu -- OBRÁCENĚ než dřívější
+        unmatched_intensity_keywords (ta hlídala odhadnuté klíče bez shody
+        v datech; teď je množina klíčů exaktní z universa, takže se hlídá
+        opačný směr): které POZOROVANÉ genre/theme/tag atributy nemají v
+        lexikonu žádný záznam. Typicky tagy, které AniList přidal až po
+        vygenerování intensity.yaml -- doplní se regenerací (--gen-intensity,
+        existující hodnoty se zachovají).
 
-        Nenulový výsledek neznamená nutně chybu (uživatel prostě nemusí mít
-        v listu nic s tím tagem), ale u víc než pár položek stojí za to
-        zkontrolovat přes list_all_tags(), jestli jde o reálný kanonický
-        název, nebo o odhad, který nikdy nic netrefí.
+        Klíč s explicitní hodnotou 0.0 se NEhlásí (je ohodnocený jako
+        neutrální, ne zapomenutý). Volej AŽ PO fit().
+
+        Vrací [(klíč, label, n_eff), ...] seřazené podle n_eff (nejčastější
+        první = největší dopad na osu náročnosti). `top` výsledek ořízne.
         """
-        seen = self.all_attr_keys
-        return {
-            "heavy": sorted(k for k in HEAVY if k not in seen),
-            "light": sorted(k for k in LIGHT if k not in seen),
-        }
+        out = [
+            (key, av.label, self.attr_counts.get(key, 0.0))
+            for key, av in self.all_attrs.items()
+            if av.category in ("genre", "theme", "tag") and key not in self.intensity
+        ]
+        out.sort(key=lambda x: (-x[2], x[0]))
+        return out[:top] if top is not None else out

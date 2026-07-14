@@ -49,8 +49,9 @@ print(f"beta={model.beta:.3f}  scale (s)={model.scale:.3f}  "
       f"CV RMSE={model.cv_rmse:.3f}  baseline RMSE={model.baseline_rmse:.3f}")
 print(f"Počet klastrů po fit(): {len(model.clusters)}")
 
-unmatched = model.unmatched_intensity_keywords()
-print(f"\nHEAVY/LIGHT klíče bez shody v datech: {unmatched}")
+unrated = model.unrated_intensity_attrs(top=10)
+print(f"\nPozorované atributy bez záznamu v intensity lexikonu (top 10): "
+      f"{[(k, round(n, 1)) for k, _lab, n in unrated] or '—'}")
 
 print("\n--- top 10 pozitivních efektů ---")
 for e in model.top_effects(10, sign=1):

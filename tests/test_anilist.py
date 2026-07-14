@@ -113,6 +113,27 @@ def test_500_exhausts_retries_and_is_not_cached(tmp_path, no_sleep):
     assert client.session.post.calls == attempts
 
 
+def test_get_tag_collection_success_is_cached(tmp_path, no_sleep):
+    tags = [
+        {"name": "Tearjerker", "description": "Sad.", "category": "Theme-Drama",
+         "isAdult": False, "isGeneralSpoiler": False},
+    ]
+    resp = FakeResponse(200, {"data": {"MediaTagCollection": tags}})
+    client, post = make_client(tmp_path, [resp], no_sleep)
+
+    assert client.get_tag_collection() == tags
+    assert post.calls == 1
+    assert client.get_tag_collection() == tags   # z cache
+    assert post.calls == 1
+
+
+def test_get_tag_collection_transient_failure_returns_empty_uncached(tmp_path, no_sleep):
+    client, post = make_client(tmp_path, [FakeResponse(500)] * len(RETRY_DELAYS), no_sleep)
+    assert client.get_tag_collection() == []
+    # transient -> necachováno, příště se zkusí znovu
+    assert client._cache.get("tag_collection") is None
+
+
 def test_get_recommendations_empty_success_is_cached_permanently(tmp_path, no_sleep):
     resp = FakeResponse(200, {"data": {"Media": {"recommendations": {"nodes": []}}}})
     client, post = make_client(tmp_path, [resp], no_sleep)

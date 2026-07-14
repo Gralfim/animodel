@@ -18,6 +18,10 @@ class ModelCfg:
     interaction_min_lift: float = 0.30
     n_clusters: int | None = None     # None = automaticky podle siluety (4–7)
     aggregate_franchises: bool = True # sequel/prequel → jeden vážený datový bod
+    intensity_lexicon: str = "intensity.yaml"  # osa náročnosti: generuj přes
+                                      # --gen-intensity, hodnoty uprav ručně;
+                                      # když soubor neexistuje, použije se
+                                      # vestavěný default (intensity.py)
 
 
 @dataclass

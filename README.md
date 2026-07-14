@@ -30,6 +30,7 @@ python -m animodel -e animelist.xml --no-anilist     # jen MAL/Jikan
 python -m animodel -e animelist.xml --shrinkage 12   # konzervativnější efekty
 python -m animodel -e animelist.xml --user-cf        # + user-based CF (pomalé)
 python -m animodel -e animelist.xml --analyze        # jen přehled franšízových skupin, bez modelu
+python -m animodel -e animelist.xml --gen-intensity  # (re)generace intensity.yaml (osa náročnosti)
 python -m animodel -e animelist.xml --verbose        # + rutinní retry/rate-limit hlášky (INFO)
 ```
 
@@ -66,7 +67,9 @@ animodel proto **necílí na známku, ale na odchylku**:
 5. **Nálady (módy).** KMeans na normalizovaných atributových vektorech; počet
    klastrů se volí podle siluety. Každý klastr dostane **osu náročnosti**
    (těžké drama/psycho vs. lehká komedie/slice-of-life) — to je ta „emocionální
-   únava", kvůli které mezi módy přepínáš.
+   únava", kvůli které mezi módy přepínáš. Osu řídí **intensity lexikon**
+   (`intensity.yaml`, viz níž): spojité hodnoty −1…+1 na atribut, generované
+   z úplného universa tagů a revidovatelné v jednom souboru.
 6. **Kalibrace.** Globální škála efektů a interval predikce z 5-násobné
    cross-validace.
 
@@ -78,6 +81,27 @@ studia, zdroj, dekáda, formát, demografie) se **objevují samy z dat**.
 tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát.
 Franšízy (sequel/prequel) se přes union-find slučují a váží `1/√k`, aby oblíbená
 desetidílná série nepřeválcovala model.
+
+### Osa náročnosti: generovaný lexikon místo ručních seznamů
+
+Jediné místo, kde je potřeba lidský úsudek, je „jak emočně těžký daný
+žánr/tag je" — to z dat odvodit nejde. Řeší to `intensity.yaml`:
+
+```bash
+python -m animodel -e animelist.xml --gen-intensity
+```
+
+stáhne **úplné universum** atributů (AniList `MediaTagCollection` — všechny
+tagy včetně popisu a kategorie; Jikan `/genres/anime` — všechny MAL
+žánry/témata) a vygeneruje YAML s hodnotou −1.0 (nejlehčí) … +1.0 (nejtěžší)
+pro každý klíč. Prefill hodnot: kurátorovaný seznam v `intensity.py` →
+prior podle AniList kategorie (Theme-Comedy → lehké, Theme-Drama → těžké) →
+0.0 (neutrální, do výpočtu nevstupuje). Řádky jsou seřazené podle četnosti
+ve **tvém** seznamu, takže revizi začneš u atributů s největším dopadem.
+
+Při regeneraci se tvé úpravy **vždy zachovají** — doplní se jen nové klíče
+(např. tagy, které AniList přidal později; model je po fitu sám vypíše jako
+„bez záznamu v lexikonu"). Bez souboru běží vestavěný default.
 
 ---
 
@@ -122,6 +146,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 |---|---|
 | `model.shrinkage_k` | vyšší = konzervativnější (malé vzorky víc tlumeny) |
 | `model.n_clusters` | `null` = auto; nebo napevno počet nálad |
+| `model.intensity_lexicon` | cesta k intensity.yaml (osa náročnosti, viz `--gen-intensity`) |
 | `recommend.w_taste_fit / w_cf / w_quality` | váhy řazení doporučení |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |
 | `recommend.high_score` | od jaké známky je titul „seed" |
@@ -147,6 +172,7 @@ animodel/
     anilist.py      AniList tagy + recommendations + tag-search + user-based CF
     shikimori.py    volitelný zdroj "podobných anime" (/similar), default vypnuto
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
+  intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
   taste.py          jádro: baseline, afinitní efekty, interakce, nálady, predikce

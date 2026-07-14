@@ -278,6 +278,19 @@ class JikanClient:
 
         return results
 
+    def get_genres(self, filter: str = "") -> list[dict]:
+        """
+        Kompletní seznam MAL žánrů/témat přes /genres/anime.
+        `filter`: "genres" | "explicit_genres" | "themes" | "demographics"
+        (prázdné = všechno dohromady). Vrací [{mal_id, name, url, count}, ...].
+        Universum pro intensity lexikon (viz animodel/intensity.py).
+        """
+        q = f"genres/anime?filter={filter}" if filter else "genres/anime"
+        data = self._get(q)
+        if data and "data" in data:
+            return data["data"]
+        return []
+
     # ── Doporučení (item-based CF graf) ────────────────────────────────────
     def get_recommendations(self, mal_id: int) -> list[dict]:
         """

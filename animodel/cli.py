@@ -5,6 +5,7 @@ cli.py — Orchestrace celého běhu.
   python -m animodel --export animelist.xml --no-recommend     # jen model
   python -m animodel --export animelist.xml --no-anilist       # jen Jikan
   python -m animodel --export animelist.xml --analyze          # jen přehled franšíz
+  python -m animodel --export animelist.xml --gen-intensity    # jen (re)generace intensity.yaml
 
 Jediný vstup = MAL XML export. Žádný ruční mezikrok: stáhne metadata, postaví
 model, vygeneruje model.html a recommendations.html.
@@ -76,27 +77,65 @@ def run(args) -> int:
         print_series_groups(completed, jdata, titles_map)
         return 0
 
+    if args.gen_intensity:
+        from .intensity import generate_lexicon
+        enr = Enricher(cfg)
+        if not enr.anilist:
+            print("[pozn.] AniList vypnutý (--no-anilist / use_anilist: false) — "
+                  "universum bude jen z MAL žánrů/témat, bez AniList tagů.")
+        # Frekvence atributů z tvého seznamu — jen k prioritizaci revize
+        # (nejčastější první). Po normálním běhu jde vše z cache; na studené
+        # cache tohle stáhne metadata stejně jako běžný běh.
+        print("[1/2] Počítám frekvence atributů z tvého seznamu (z cache) …")
+        enriched = enr.enrich_ids([e.mal_id for e in completed], show_progress=True)
+        counts: dict[str, int] = {}
+        for en in enriched.values():
+            for key, av in en.attrs.items():
+                if av.category in ("genre", "theme", "tag"):
+                    counts[key] = counts.get(key, 0) + 1
+        print("[2/2] Stahuji universum tagů (AniList MediaTagCollection + MAL žánry) …")
+        stats = generate_lexicon(
+            cfg.model.intensity_lexicon,
+            jikan=enr.jikan, anilist=enr.anilist, observed_counts=counts,
+        )
+        print(f"      → {cfg.model.intensity_lexicon}: {stats['total']} klíčů "
+              f"({stats['from_existing']} tvých zachováno, "
+              f"{stats['from_curated']} prefill, {stats['from_prior']} kategorie-prior, "
+              f"{stats['zero']} neutrálních k případné revizi"
+              + (f", {stats['custom_kept']} vlastních mimo universum" if stats['custom_kept'] else "")
+              + ")")
+        print("      Zreviduj hodnoty (nejčastější atributy jsou v sekcích nahoře) a "
+              "spusť normální běh.")
+        return 0
+
     print(f"[2/5] Stahuju metadata (Jikan{' + AniList' if cfg.enrich.use_anilist else ''}) …")
     enr = Enricher(cfg)
     titles = enr.build_titles(completed, show_progress=True)
     print(f"      obohaceno {len(titles)} titulů")
 
     print(f"[3/5] Stavím model vkusu (shrinkage K={cfg.model.shrinkage_k:g}) …")
+    from .intensity import load_lexicon
+    lexicon = load_lexicon(cfg.model.intensity_lexicon)
+    if lexicon is None:
+        print(f"      [pozn.] {cfg.model.intensity_lexicon} neexistuje — osa náročnosti "
+              f"jede na vestavěném defaultu; vygeneruj vlastní přes --gen-intensity")
     model = TasteModel(
         shrinkage_k=cfg.model.shrinkage_k,
         min_attr_count=cfg.model.min_attr_count,
         interaction_min_count=cfg.model.interaction_min_count,
         interaction_min_lift=cfg.model.interaction_min_lift,
+        intensity=lexicon,
     )
     model.fit(titles, n_clusters=cfg.model.n_clusters)
     print(f"      β={model.beta:+.2f} · CV RMSE {model.cv_rmse:.3f} "
           f"(baseline {model.baseline_rmse:.3f}) · {len(model.clusters)} nálad")
 
-    unmatched = model.unmatched_intensity_keywords()
-    if unmatched["heavy"] or unmatched["light"]:
-        print(f"      [pozn.] osa náročnosti: klíče bez shody v datech — "
-              f"heavy={unmatched['heavy'] or '—'}, light={unmatched['light'] or '—'} "
-              f"(nemusí být chyba, ale stojí za kontrolu proti list_all_tags())")
+    unrated = model.unrated_intensity_attrs(top=12)
+    if unrated:
+        listed = ", ".join(f"{label} ({n:.0f}×)" for _key, label, n in unrated)
+        print(f"      [pozn.] osa náročnosti: {len(model.unrated_intensity_attrs())} "
+              f"pozorovaných atributů bez záznamu v lexikonu, nejčastější: {listed} "
+              f"— doplň regenerací (--gen-intensity, tvé hodnoty se zachovají)")
 
     stats = _build_stats(model, by_status, titles)
     model_html = os.path.join(cfg.out_dir, "model.html")
@@ -187,6 +226,11 @@ def main(argv=None) -> int:
     p.add_argument("--analyze", action="store_true",
                    help="vypiš přehled nalezených franšízových skupin a skonči "
                         "(print_series_groups byla v kódu, ale bez cesty ven z CLI)")
+    p.add_argument("--gen-intensity", action="store_true",
+                   help="vygeneruj/aktualizuj intensity.yaml (osa emocionální "
+                        "náročnosti) z úplného universa AniList tagů + MAL "
+                        "žánrů/témat a skonči; existující hodnoty se zachovají, "
+                        "řazení podle frekvence ve tvém seznamu")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="ukaž i běžné retry/rate-limit hlášky (INFO), ne jen "
                         "skutečné chyby -- default je jen WARNING a výš, ať "
