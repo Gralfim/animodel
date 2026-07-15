@@ -334,6 +334,12 @@ skutečně neutrální.
 > část v budoucnu přepracovat (současný config ji vědomě tlačí za hranice
 > původního návrhu) — do té doby jen údržba korektnosti, žádný refaktor.
 > Watchers stránkování už mezitím přešlo na per-page cache.
+>
+> **Stav (2026-07-16): VYŘEŠENO redesignem.** User-CF přepracováno na
+> „senpai" pipeline (`animodel/usercf.py`): discovery přes nišové tituly →
+> plné seznamy kandidátů → Pearson na plném překryvu se smrštěním → pár
+> jmenovitých senpai. Monolitická metoda v anilist.py smazána; v klientovi
+> zůstaly jen síťové primitivy (watchers stránky, get_user_animelist).
 
 Viz §2 — ~340 řádků: výběr seedů podle vzácnosti, IDF váhování, stránkované
 stahování s cache, Pearsonova korelace, řešení soukromých účtů, finální

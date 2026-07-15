@@ -4,10 +4,17 @@ Atributy se objevují automaticky z dat (to je hlavní rozdíl oproti starému
 přístupu s ručně udržovaným config.yaml).
 
 Načítá volitelný uživatelský config.yaml a překrývá jím defaulty.
+Neznámé klíče hlásí warningem -- při přejmenování/odstranění parametru by
+jinak staré klíče v uživatelově configu tiše přestaly působit (přesně to
+se stalo u user_cf_min_overlap/user_cf_top_users při senpai redesignu).
 """
 from __future__ import annotations
+
+import logging
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,10 +83,31 @@ class RecommendCfg:
     top_n: int = 40                   # kolik doporučení ve globálním přehledu
     top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu
     use_user_cf: bool = False         # zapnout user-based CF přes AniList (drahé, pomalé)
-    user_cf_min_overlap: int = 4      # min. počet sdílených (nišových) seedů s uživatelem
-    user_cf_top_users: int = 120      # kolik nejpodobnějších uživatelů použít
-    user_cf_seed_count: int = 25      # kolik nejméně populárních seedů použít
-    user_cf_users_per_seed: int = 100 # kolik uživatelů stáhnout na jeden seed
+    # -- senpai pipeline (viz usercf.py): discovery přes nišové tituly ->
+    #    plné seznamy kandidátů -> podobnost na plném překryvu -> pár senpai
+    user_cf_seed_count: int = 50      # kolik nejméně populárních titulů použít k discovery
+    user_cf_users_per_seed: int = 100 # kolik sledujících vzorkovat na jeden seed
+    user_cf_min_sample_overlap: int = 2   # min. sdílených nišových seedů pro kvalifikaci
+                                      # (1 může být náhoda, 2+ je vzorec)
+    user_cf_candidate_pool: int = 200 # kolik kandidátů vyhodnotit na PLNÝCH seznamech
+    user_cf_senpai_count: int = 20    # kolik nejpodobnějších uživatelů (senpai) vybrat
+    user_cf_min_full_overlap: int = 40    # min. společně ohodnocených titulů (plný překryv)
+    user_cf_shrink_k: float = 50.0    # smrštění podobnosti n/(n+K) -- málo překryvu, málo důvěry
+    user_cf_fav_score: float = 9.0    # od jaké MÉ známky je titul "oblíbený" pro
+                                      # výpočet pokrytí senpaiem
+    user_cf_fav_miss_penalty: float = 0.3
+                                      # lehký negativní signál: senpai, který mé
+                                      # oblíbené tituly nemá ohodnocené ANI na PTW,
+                                      # ztrácí až tolik ze skóre (0.3 = -30 % při
+                                      # nulovém pokrytí; 0 = penalizaci vypnout).
+                                      # Dropnutý-bez-známky se počítá jako nepokrytý;
+                                      # dropnutý SE známkou je řádný (a výmluvný)
+                                      # datový bod v podobnosti.
+    user_cf_exclude_users: list = field(default_factory=list)
+                                      # AniList jména vyloučená z hledání senpai
+                                      # (vlastní/alt účty -- import vlastního MAL
+                                      # seznamu má podobnost 1.00 a je k ničemu).
+                                      # Jméno z MAL exportu přidává cli.py automaticky.
 
 
 @dataclass
@@ -103,8 +131,15 @@ class Config:
                     for kk, vv in v.items():
                         if hasattr(sub, kk):
                             setattr(sub, kk, vv)
+                        else:
+                            log.warning(
+                                f"config {path}: neznámý klíč '{k}.{kk}' -- "
+                                f"ignoruje se (překlep, nebo parametr už neexistuje?)"
+                            )
                 elif hasattr(cfg, k):
                     setattr(cfg, k, v)
+                else:
+                    log.warning(f"config {path}: neznámý klíč '{k}' -- ignoruje se")
         return cfg
 
     def as_dict(self):

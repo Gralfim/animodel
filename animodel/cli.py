@@ -77,6 +77,18 @@ def run(args) -> int:
     print(f"      {len(entries)} záznamů · {len(completed)} ohodnocených · "
           f"{len(by_status.get('Plan to Watch', []))} PTW")
 
+    # Vlastní účet nesmí vyjít jako senpai: import vlastního MAL seznamu na
+    # AniList má podobnost 1.00 a doporučil by ti jen to, co už máš. Jméno z
+    # MAL exportu se vyloučí automaticky -- funguje, jen když máš na AniListu
+    # stejnou přezdívku; jinak (nebo pro alt účty) přidej ručně do
+    # recommend.user_cf_exclude_users.
+    mal_user = (userinfo.get("user_name") or "").strip()
+    if mal_user and mal_user.lower() not in {
+        n.strip().lower() for n in cfg.recommend.user_cf_exclude_users
+    }:
+        cfg.recommend.user_cf_exclude_users = list(
+            cfg.recommend.user_cf_exclude_users) + [mal_user]
+
     if args.analyze:
         from .series import print_series_groups
         enr = Enricher(cfg)
@@ -217,7 +229,8 @@ def run(args) -> int:
                 r["title_en"] = al_titles_en.get(mid, "")
 
         report.render_cf_recommendations_html(cf_recs, cf_html, userinfo, enr_data,
-                                              watched_ids=watched_ids)
+                                              watched_ids=watched_ids,
+                                              senpai=getattr(rec, "_cf_senpai", []))
         print(f"      → {cf_html}  ({len(cf_recs)} CF titulů)")
     elif cfg.recommend.use_user_cf:
         print("      [CF report přeskočen — žádné výsledky]")

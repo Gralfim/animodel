@@ -10,8 +10,9 @@ Strategie (dvě nezávislé větve, sjednocené a deduplikované):
      => kandidáti, kteří jsou buď podobní oblíbeným, nebo nesou tvé silné atributy
 
   B) COLLABORATIVE / USER větev (volitelná, vypnutá defaultně)
-     - najdi uživatele s podobným vkusem a jejich vysoko hodnocené tituly
-     - (drahé přes AniList; zapíná se recommend.use_user_cf=True)
+     - „senpai" pipeline (usercf.py): pár uživatelů s ověřeně podobným
+       vkusem na PLNÉM překryvu seznamů; doporučení = co hodnotí nad svůj
+       osobní průměr (drahé přes AniList; zapíná se recommend.use_user_cf=True)
 
 Skórování každého kandidáta (4 oddělené složky):
     composite = w_taste_fit * z(taste_fit)
@@ -243,38 +244,29 @@ class Recommender:
 
         # B) user-based CF (volitelné)
         self._cf_raw_results = []  # reset před každým spuštěním
+        self._cf_senpai = []
         if self.rc.use_user_cf and self.enr.anilist:
             self._user_cf(titles, seen_ids, bump)
 
         return cand
 
     def _user_cf(self, titles, seen_ids, bump):
-        """User-based CF přes AniList. Best-effort, vypnuté defaultně."""
-        finder = getattr(self.enr.anilist, "similar_users_recommendations", None)
-        if not callable(finder):
-            print("  user-CF: přeskočeno (AniList klient metodu nepodporuje)")
-            return
-        # Seedy = vše, co jsi viděl a ohodnotil; metoda si sama vybere ty
-        # nejnišovější. Předáme i tvá skóre kvůli kosinové podobnosti.
+        """User-based CF: senpai pipeline (viz usercf.py). Best-effort."""
+        from .usercf import find_senpai_recommendations
         rated = [t for t in titles if t.user_score and t.user_score > 0]
-        liked = [t.mal_id for t in rated]
         user_scores = {t.mal_id: t.user_score for t in rated}
-        print(f"  user-CF: {len(liked)} ohodnocených titulů na vstupu, "
-              f"min_overlap={self.rc.user_cf_min_overlap}, "
-              f"seed_count={self.rc.user_cf_seed_count}")
+        print(f"  user-CF: {len(user_scores)} ohodnocených titulů na vstupu, "
+              f"hledám {self.rc.user_cf_senpai_count} senpai "
+              f"z poolu {self.rc.user_cf_candidate_pool} kandidátů")
         try:
-            recs = finder(
-                liked,
-                min_overlap=self.rc.user_cf_min_overlap,
-                top_users=self.rc.user_cf_top_users,
-                seed_count=self.rc.user_cf_seed_count,
-                users_per_seed=self.rc.user_cf_users_per_seed,
-                user_scores=user_scores,
+            senpai, recs = find_senpai_recommendations(
+                self.enr.anilist, user_scores, watched_ids=seen_ids, rc=self.rc,
             )
-            self._cf_raw_results = recs  # uloženo pro CF HTML report
+            self._cf_senpai = senpai         # pro CF HTML report
+            self._cf_raw_results = recs      # uloženo pro CF HTML report
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
-            print(f"  user-CF: {len(recs)} kandidátů přidáno")
+            print(f"  user-CF: {len(senpai)} senpai, {len(recs)} kandidátů přidáno")
         except Exception as exc:
             print(f"  user-CF: selhalo ({exc})")
 

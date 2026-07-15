@@ -144,8 +144,20 @@ Dvě nezávislé větve, sjednocené a deduplikované:
   (`enrich.use_shikimori` v configu, default vypnuto — naživo neověřený tvar
   odpovědi), a navíc discovery přes AniList tag-search na tvé
   nejcharakterističtější tagy.
-- **Collaborative / uživatelská** (volitelná, `--user-cf`) — uživatelé s podobným
-  vkusem a jejich vysoko hodnocené tituly.
+- **Collaborative / uživatelská** (volitelná, `--user-cf`) — hledání „senpai":
+  pár (default 20) uživatelů s **ověřeně** podobným vkusem, kteří viděli víc než
+  ty. Discovery jde přes tvé nejméně populární tituly (sdílení nišového titulu
+  je silný signál), ale překryv a podobnost se počítá až na **plných seznamech**
+  kandidátů (Pearson na komunitně-relativních odchylkách, smrštěný velikostí
+  překryvu) — ne na vzorku. Skóre navíc **sráží nepokryté oblíbené** tituly:
+  kdo tvé nejlepší známky nemá ohodnocené ani na PTW, je slabší průvodce
+  (`user_cf_fav_miss_penalty`). **Dropnuté tituly se známkou** se počítají jako
+  plnohodnotné hodnocení — „zkusil a dal 3" o shodě vkusu řekne víc než většina
+  desítek. Senpai jsou vidět jmenovitě v CF reportu i s metrikami; doporučení =
+  tituly, které senpai hodnotí nad svůj osobní průměr.
+  Tvůj vlastní účet se vylučuje (podle jména z MAL exportu; máš-li na AniListu
+  jinou přezdívku, přidej ji do `recommend.user_cf_exclude_users`) — import
+  vlastního seznamu má podobnost 1.00 a doporučil by ti jen to, co už máš.
 
 Každý kandidát se skóruje kompozitem (sčítají se z-skóry čtyř oddělených
 složek):
@@ -195,7 +207,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `enrich.use_jikan` | vypni pro nouzový AniList-only režim (viz `--no-jikan`) |
 | `enrich.include_staff` | signál po režisérech/scenáristech (+1 Jikan volání/titul, default vypnuto) |
 | `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (naživo neověřeno, default vypnuto) |
-| `recommend.use_user_cf*` | user-based CF přes AniList a jeho ladění (viz `--user-cf`, dražší/pomalejší) |
+| `recommend.use_user_cf` + `user_cf_*` | senpai pipeline (viz `--user-cf`): počet senpai, velikost poolu, min. plný překryv… |
 
 Plný seznam parametrů (včetně výchozích hodnot) je v `config.example.yaml`.
 
@@ -215,6 +227,7 @@ animodel/
     shikimori.py    volitelný zdroj "podobných anime" (/similar), default vypnuto
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
   intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
+  usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
   taste.py          jádro: baseline, afinitní efekty, interakce, nálady, predikce

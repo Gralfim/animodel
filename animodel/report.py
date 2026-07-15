@@ -662,6 +662,7 @@ def render_cf_recommendations_html(
     userinfo: dict = None,
     enr_data: dict = None,
     watched_ids: set = None,
+    senpai: list = None,
 ) -> str:
     """Standalone HTML report pro vysledky user-based CF, karta-style."""
     parts = [_head("CF doporu\u010den\xed \u2014 animodel")]
@@ -676,6 +677,38 @@ def render_cf_recommendations_html(
         f'\u017eeb\u0159\xed\u010dk\u016f se tu shl\xe9dnut\xe9 tituly nefiltruj\xed, jen '
         f'ozna\u010duj\xed \u0161t\xedtkem \u2014 potvrzuj\xed shodu vkusu.</p>'
     )
+
+    # \u2500\u2500 Tvoji senpai: u\u017eivatel\u00e9 s ov\u011b\u0159en\u011b podobn\u00fdm vkusem \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if senpai:
+        parts.append('<h2>Tvoji senpai</h2>')
+        parts.append('<p class="note">Podobnost = Pearson na komunitn\u011b-relativn\u00edch '
+                     'odchylk\u00e1ch p\u0159es V\u0160ECHNY tituly, kter\u00e9 m\u00e1te ohodnocen\u00e9 oba '
+                     '(ne jen vzorek). Sk\u00f3re = podobnost smr\u0161t\u011bn\u00e1 velikost\u00ed p\u0159ekryvu '
+                     '(n/(n+K)) a sn\u00ed\u017een\u00e1 za nepokryt\u00e9 obl\u00edben\u00e9. \u201eObl\u00edben\u00e9" = pod\u00edl '
+                     'tv\u00fdch nejlep\u0161\u00edch zn\u00e1mek, kter\u00e9 senpai zn\u00e1 (ohodnotil, nebo m\u00e1 '
+                     'na PTW) \u2014 kdo v\u011bt\u0161inu tv\u00fdch favorit\u016f nezn\u00e1, je slab\u0161\u00ed pr\u016fvodce. '
+                     '\u201eNav\u00edc" = kolik jeho ohodnocen\u00fdch titul\u016f ty nem\u00e1\u0161 shl\u00e9dnut\u00fdch '
+                     '\u2014 z\u00e1sob\u00e1rna doporu\u010den\u00ed.</p>')
+        parts.append('<div class="panel"><table>'
+                     '<tr><th>senpai</th><th>sk\u00f3re</th><th>podobnost</th>'
+                     '<th>p\u0159ekryv</th><th>obl\u00edben\u00e9</th>'
+                     '<th>ohodnoceno</th><th>nav\u00edc</th></tr>')
+        for s in senpai:
+            profile = f'https://anilist.co/user/{_esc(s.name)}' if s.name else '#'
+            fav_total = getattr(s, "fav_total", 0)
+            fav = (f'{s.fav_coverage:.0%} <span style="color:{MUT}">'
+                   f'({s.fav_covered}/{fav_total})</span>') if fav_total else '\u2014'
+            parts.append(
+                f'<tr><td><a href="{profile}" target="_blank">{_esc(s.name or s.uid)}</a></td>'
+                f'<td class="mono pos">{s.score:.2f}</td>'
+                f'<td class="mono">{s.similarity:+.2f}</td>'
+                f'<td class="mono">{s.overlap}</td>'
+                f'<td class="mono">{fav}</td>'
+                f'<td class="mono" style="color:{MUT}">{s.n_rated}</td>'
+                f'<td class="mono" style="color:{MUT}">{s.n_novel}</td></tr>')
+        parts.append('</table></div>')
+        parts.append('<h2>Doporu\u010den\u00ed</h2>')
+
     watched = watched_ids or set()
     for i, r_cf in enumerate(cf_recs, 1):
         mid = r_cf.get("mal_id")

@@ -11,7 +11,6 @@ Romance) a tematických kategorií (Tearjerker, Philosophy).
 Každý tag má rank 0–100 (jak dominantní je v daném titulu).
 """
 
-import math
 import time
 import logging
 from pathlib import Path
@@ -551,27 +550,6 @@ class AniListClient:
       }
     }"""
 
-    QUERY_USER_NAMES = """
-    query ($ids: [Int]) {
-      Page(perPage: 50) {
-        users(id_in: $ids) {
-          id
-          name
-        }
-      }
-    }"""
-
-    @staticmethod
-    def _norm_score(raw: float) -> float:
-        """
-        Normalizuj AniList skóre na 0–1. AniList ukládá v uživatelově formátu
-        (POINT_100, POINT_10, POINT_10_DECIMAL, POINT_5, POINT_3). Heuristika:
-        hodnota > 10 → /100, jinak → /10. Jde o signál, ne o přesné číslo.
-        """
-        if raw <= 0:
-            return 0.0
-        return raw / 100.0 if raw > 10 else raw / 10.0
-
     def _media_popularity(self, anilist_id: int, fallback_mal_id: int) -> int:
         """Počet uživatelů, kteří titul mají v listu. Z cache nebo dotazem."""
         media = self._cached_media(fallback_mal_id)
@@ -616,7 +594,7 @@ class AniListClient:
         has_next = bool((pg.get("pageInfo") or {}).get("hasNextPage"))
         return Result.success({"entries": entries, "has_next": has_next})
 
-    def _iter_watcher_entries(self, anilist_id: int, users_per_seed: int,
+    def get_watcher_entries(self, anilist_id: int, users_per_seed: int,
                               per_page: int = 50) -> list:
         """
         Sekvenčně skládá ohodnocené sledující média `anilist_id` -- stránku
@@ -676,405 +654,65 @@ class AniListClient:
 
         return collected[:users_per_seed]
 
-    def similar_users_recommendations(
-        self,
-        liked_mal_ids: list[int],
-        min_overlap: int = 4,
-        top_users: int = 120,
-        seed_count: int = 25,
-        users_per_seed: int = 100,
-        user_scores: dict[int, float] | None = None,
-        scan_budget_factor: float = 3.0,
-    ) -> list[dict]:
+    def get_user_animelist(self, uid: int) -> dict | None:
         """
-        User-based collaborative filtering přes AniList.
+        Kompletní seznam uživatele (včetně custom listů), cache
+        `userlist_{uid}_v2`. Vrací:
 
-          1) SEEDY = MÉNĚ POPULÁRNÍ tvé oblíbené tituly. Sdílení nišového
-             titulu je mnohem silnější signál podobného vkusu než sdílení
-             blockbusteru — a navíc u nišového titulu pokryje vzorek
-             `users_per_seed` uživatelů výrazně větší podíl celé populace,
-             takže opakované výskyty (= překryv) reálně vznikají.
+            {"fmt": scoreFormat,
+             "entries":  [[mal_id, raw_score, avg_raw, title], ...],
+             "planning": [mal_id, ...]}
 
-          2) VÁŽENÝ PŘEKRYV. Každý sdílený seed přispěje vahou
-             ~ -log(popularita) — vzácné tituly váží víc (analogie IDF).
-             `min_overlap` se pak vztahuje k počtu sdílených seedů (drží se
-             jako tvrdý práh počtu), zatímco řazení uživatelů jde dle váhy.
+        `entries` = OHODNOCENÉ záznamy, nově VČETNĚ statusu DROPPED: jeho
+        známka je platný (a pro shodu vkusu velmi výmluvný) signál --
+        „zkusil a dal 3" o kompatibilitě říká víc než většina desítek.
+        Dřív se DROPPED zahazoval celý, čímž se ta informace ztrácela.
 
-          3) PODOBNOST = kosinus ratingových vektorů na překryvu, ne jen
-             počet. Bere v potaz, ZDA titul hodnotíme podobně.
+        `planning` = tituly na jeho plan-to-watch. Nemají známku, takže do
+        `entries` nepatří, ale usercf.py je potřebuje odlišit od „nikdy o
+        tom neslyšel": mít můj oblíbený titul ve frontě není důvod k
+        penalizaci (viz user_cf_fav_miss_penalty).
 
-          4) Stahují se i CUSTOM listy (jinak by se ztratily skryté entries).
+        Cache klíč nese _v2 (schéma odpovědi) -- staré `userlist_{uid}`
+        soubory pole `planning` nemají a chybějící pole nejde odlišit od
+        „nic neplánuje", což by vedlo k falešné penalizaci.
 
-          5) SOUKROMÉ/SMAZANÉ ÚČTY se přeskočí BEZ ztráty místa v top_users.
-             AniList User typ nemá žádné queryovatelné "isPrivate" pole --
-             pozná se to až při pokusu o MediaListCollection, typicky jako
-             404 "Private User". Kandidáti se proto neořezávají na top_users
-             hned při výběru, ale prochází se CELÝ seřazený pool, dokud se
-             nenajde top_users POUŽITELNÝCH. `scan_budget_factor` je pojistka
-             proti neomezenému skenování.
-
-          Sledující jednotlivých seedů se stahují a cachují PO STRÁNKÁCH
-          (viz `_iter_watcher_entries`/`_fetch_watchers_page`) -- dočasné
-          selhání na stránce N neztratí už stažené stránky 1..N-1.
-
-        Parametry:
-            liked_mal_ids   — tvoje oblíbené (seedy bereme z méně populárních)
-            min_overlap     — minimální počet sdílených seedů (tvrdý práh)
-            top_users       — kolik POUŽITELNÝCH (ne jen zkusených) uživatelů chceš
-            seed_count      — kolik nejméně populárních seedů použít
-            users_per_seed  — kolik uživatelů stáhnout na jeden seed
-            user_scores     — {mal_id: tvé_score} pro kosinovou podobnost
-                              (volitelné; bez něj se použije jen vážený překryv)
-            scan_budget_factor — kolikrát víc kandidátů (než top_users) zkusit
-                              projít, než se to vzdá s tím, co se sehnalo.
-
-        Vrátí list[dict] {'mal_id', 'score'}. Best-effort.
+        None = privátní/smazaný účet (permanent, cachováno natrvalo --
+        příští běhy už síť nezkouší) NEBO dočasné selhání (necachováno,
+        zkusí se příště). Volajícímu (usercf.py) na rozdílu nezáleží:
+        v obou případech kandidáta přeskočí bez ztráty místa v poolu.
         """
-        from collections import defaultdict
+        return cached_fetch(self._cf_cache, f"userlist_{uid}_v2",
+                            lambda: self._fetch_user_animelist(uid))
 
-        # 1. MAL ID -> AniList ID (z enrich cache, jež už proběhla)
-        mal_to_anilist: dict[int, int] = {}
-        for mal_id in liked_mal_ids:
-            media = self._cached_media(mal_id)
-            if media and media.get("id"):
-                mal_to_anilist[mal_id] = media["id"]
-
-        if not mal_to_anilist:
-            log.warning("user-CF: žádné AniList ID v cache – enrich musí proběhnout dřív")
-            return []
-
-        # 2. Vyber NEJMÉNĚ POPULÁRNÍ seedy (vzácnost = silnější signál).
-        #    Popularitu bereme z cache (uložená při enrichi), fallback dotazem.
-        pop_by_mal:      dict[int, int]   = {}
-        seed_comm_norm:  dict[int, float]  = {}  # mal_id → AniList averageScore/100
-        for mal_id, aid in mal_to_anilist.items():
-            pop_by_mal[mal_id] = self._media_popularity(aid, mal_id) or 10**9
-            media = self._cached_media(mal_id)
-            avg   = (media.get("averageScore") or 0) if media else 0
-            seed_comm_norm[mal_id] = avg / 100.0 if avg else 0.75
-
-        # seřaď vzestupně dle popularity -> nejnišovější první
-        ranked = sorted(mal_to_anilist.items(), key=lambda kv: pop_by_mal[kv[0]])
-        seeds = ranked[:seed_count]
-        n = len(seeds)
-
-        # IDF-like váha seedu: vzácný titul (nízká popularita) váží víc.
-        # +2 ať se vyhneme log(0/1); normujeme později implicitně.
-        seed_weight = {
-            mal_id: math.log10((pop_by_mal[mal_id] or 1) + 10)
-            for mal_id, _ in seeds
-        }
-        max_w = max(seed_weight.values()) if seed_weight else 1.0
-        # invertuj: nízká popularita -> vysoká váha
-        seed_weight = {m: (max_w - w + 0.5) for m, w in seed_weight.items()}
-
-        # 3. Pro každý seed slož sledující (stránka po stránce, viz
-        #    _iter_watcher_entries) i s jejich ratingem.
-        #    user_profile[uid] = {seed_mal_id: norm_score}
-        #    user_names[uid]   = username (pro výstup)
-        user_profile: defaultdict[int, dict[int, float]] = defaultdict(dict)
-        user_weight: defaultdict[int, float] = defaultdict(float)
-        user_names: dict[int, str] = {}
-
-        n_incomplete = 0
-        for i, (mal_id, anilist_id) in enumerate(seeds):
-            progress(f"  user-CF: sbírám uživatele [{i+1}/{n}] (pop≈{pop_by_mal[mal_id]}) ...")
-            watchers = self._iter_watcher_entries(anilist_id, users_per_seed)
-            if len(watchers) < users_per_seed:
-                n_incomplete += 1
-            for uid, uname, raw in watchers:
-                user_profile[uid][mal_id] = self._norm_score(raw)
-                user_weight[uid] += seed_weight.get(mal_id, 1.0)
-                user_names[uid]   = uname
-
-        progress_done(
-            f"  user-CF: sbírám uživatele [{n}/{n}] ... hotovo"
-            + (f"  ({n_incomplete} seedů má méně než {users_per_seed} sledujících "
-               f"— vyčerpaný titul nebo chyba, viz log)" if n_incomplete else "")
-        )
-
-        # Doplň chybějící jména batch dotazem (záchrana pro starou cache)
-        missing_ids = [uid for uid in user_profile if uid not in user_names]
-        if missing_ids:
-            batch_size = 50
-            for i in range(0, len(missing_ids), batch_size):
-                chunk  = missing_ids[i:i + batch_size]
-                result = self._request(self.QUERY_USER_NAMES, {"ids": chunk})
-                if result.ok:
-                    for u in (result.data.get("data", {}).get("Page", {})
-                              .get("users", [])):
-                        if u.get("id") and u.get("name"):
-                            user_names[u["id"]] = u["name"]
-            log.debug(f"user-CF: doplněno {len(missing_ids)} jmen")
-
-        if not user_profile:
-            log.info("user-CF: žádní uživatelé nenalezeni")
-            return []
-
-        # 4. Podobnost uživatele = kosinus ratingových vektorů na překryvu
-        def cosine(uid: int) -> float:
-            """Vážená Pearsonova korelace na komunitně-relativních skóre.
-
-            diff_mine_j  = my_norm_j  - c_norm_j   (odchylka ode mě od komunity)
-            diff_their_j = their_norm_j - c_norm_j  (odchylka od nich od komunity)
-
-            Pearson automaticky centruje oba vektory kolem jejich průměru →
-            odstraní absolutní bias (kdo hodnotí výš/níž celkově) a zachová
-            TVAR preference. Nízká variance (plochý hodnotitel) → blízko 0.
-            """
-            shared = user_profile[uid]
-            if not user_scores:
-                return user_weight[uid]
-
-            my_diffs: list[float]    = []
-            their_diffs: list[float] = []
-            weights: list[float]     = []
-
-            for mid, their_norm in shared.items():
-                my_raw = user_scores.get(mid) or 0
-                if not my_raw:
+    def _fetch_user_animelist(self, uid: int) -> Result:
+        result = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})
+        if not result.ok:
+            return result
+        collection = (result.data.get("data") or {}).get("MediaListCollection") or {}
+        fmt = ((collection.get("user") or {})
+               .get("mediaListOptions", {})
+               .get("scoreFormat", "UNKNOWN"))
+        entries = []
+        planning = []
+        for lst in collection.get("lists", []):
+            for e in lst.get("entries", []):
+                media = e.get("media") or {}
+                mid = media.get("idMal")
+                if not mid:
                     continue
-                my_norm = self._norm_score(my_raw * 10)
-                c       = seed_comm_norm.get(mid, 0.75)
-                my_diffs.append(my_norm  - c)
-                their_diffs.append(their_norm - c)
-                weights.append(seed_weight.get(mid, 1.0))
-
-            if len(my_diffs) < 2:
-                return 0.0
-
-            total_w  = sum(weights)
-            my_mean  = sum(w * d for w, d in zip(weights, my_diffs))   / total_w
-            th_mean  = sum(w * d for w, d in zip(weights, their_diffs)) / total_w
-            my_c     = [d - my_mean for d in my_diffs]
-            th_c     = [d - th_mean for d in their_diffs]
-            num      = sum(w * a * b for w, a, b in zip(weights, my_c, th_c))
-            den_m    = math.sqrt(sum(w * a * a for w, a in zip(weights, my_c)))
-            den_t    = math.sqrt(sum(w * b * b for w, b in zip(weights, th_c)))
-            if den_m < 1e-9 or den_t < 1e-9:
-                return 0.0
-            return num / (den_m * den_t)
-
-        candidates = [
-            (uid, cosine(uid))
-            for uid, prof in user_profile.items()
-            if len(prof) >= min_overlap
-        ]
-
-        if not candidates:
-            best = max(len(p) for p in user_profile.values())
-            status(f"  user-CF: nikdo nesplnil min_overlap={min_overlap} "
-                   f"(max překryv: {best}) – zkus snížit min_overlap")
-            log.info(f"user-CF: max překryv {best} < min_overlap {min_overlap}")
-            return []
-
-        candidates.sort(key=lambda x: -x[1])
-        # Neořezávej na top_users HNED -- ponech celý seřazený pool. Soukromé
-        # profily ("Private User" 404) se pozná až při pokusu o stažení
-        # seznamu, ne dřív. Když by se ořezávalo hned tady, soukromý uživatel
-        # by natrvalo sebral jedno z `top_users` míst.
-        sim_by_uid = dict(candidates)
-
-        status(f"  user-CF: {len(candidates)} kandidátů nad min_overlap, "
-               f"cílím na {top_users} použitelných (soukromé/smazané se "
-               f"přeskočí bez ztráty místa)…")
-
-        # 5. Stáhni listy podobných uživatelů.
-        #    Diferenciální agregace:
-        #      diff_i = norm_score_i − community_norm_i
-        #      → kladné: uživatel hodnotí výš než průměr (dobrý signál)
-        #      → záporné: uživatel hodnotí níž (negativní signál, přispívá záporně)
-        #    Výsledek: weighted_diff = Σ(sim_i × diff_i) / Σ(sim_i)
-        #    CF skóre = community_norm + weighted_diff  (0–1 škála → *10 = 0–10)
-        liked_set = set(liked_mal_ids)
-
-        # Σ sim×diff, Σ sim, počet hodnotitelů, community avg, top raters
-        agg_diff: defaultdict[int, float]   = defaultdict(float)  # Σ sim×diff
-        agg_sim:  defaultdict[int, float]   = defaultdict(float)  # Σ sim
-        title_store: dict[int, str]         = {}                   # mal_id → název
-        rec_count: defaultdict[int, int]    = defaultdict(int)
-        comm_norm: dict[int, float]         = {}                   # community 0–1
-        rater_list: defaultdict[int, list]  = defaultdict(list)   # [(sim, uname)]
-
-        _DIVISORS = {
-            "POINT_100":        100.0,
-            "POINT_10_DECIMAL": 10.0,
-            "POINT_10":         10.0,
-            "POINT_5":          5.0,
-            "POINT_3":          3.0,
-        }
-
-        m = len(candidates)
-        # Neskenuj neomezeně dlouho do pool -- pojistka pro patologický případ
-        # (např. 80 % kandidátů soukromých by jinak mohlo projít celý pool).
-        max_attempts = min(m, max(top_users, int(top_users * scan_budget_factor)))
-
-        _ul_cache_hits     = 0
-        _ul_fetched        = 0
-        _ul_failed_transient = 0   # síť/5xx/timeout -- zkusí se znovu příště
-        _ul_skipped_empty  = 0     # bez použitelných dat (privátní/smazaní/prázdní) -- z cache NEBO čerstvě zjištěno
-        good_users = 0
-        j = 0
-        while good_users < top_users and j < max_attempts:
-            uid, sim_val = candidates[j]
-            j += 1
-            sim  = max(0.0, sim_val)
-            name = user_names.get(uid, str(uid))
-            ck   = f"userlist_{uid}"
-
-            cached_ul = self._cf_cache.get(ck)
-            if cached_ul is not None:
-                _ul_cache_hits += 1
-                if not cached_ul["found"]:
-                    # Známo z minula: soukromý/smazaný/natrvalo selhaný
-                    # účet. NEpřičítej se do good_users -- jde se rovnou na
-                    # dalšího kandidáta, ať tenhle mrtvý slot nepřijde nazmar.
-                    _ul_skipped_empty += 1
-                    progress(f"  user-CF: [{j}/{max_attempts}] {name} přeskočen (známo: bez dat)")
+                if e.get("status") == "PLANNING":
+                    planning.append(mid)
                     continue
-                _fmt        = cached_ul["data"]["fmt"]
-                raw_entries = cached_ul["data"]["entries"]
-                progress(f"  user-CF: seznam [{j}/{max_attempts}] z cache")
-            else:
-                # Cache miss — stáhni a zpracuj
-                progress(f"  user-CF: stahuji seznam [{j}/{max_attempts}] ...")
-                result = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})
-                if not result.ok:
-                    if result.permanent:
-                        # 400/404/422/GraphQL chyba -- typicky "Private
-                        # User" (404), neplatné userId nebo smazaný účet.
-                        # Retry se stejným uid nikdy neuspěje, takže je
-                        # bezpečné zacachovat "žádná data" natrvalo. Na
-                        # PŘÍŠTÍM běhu tenhle uid nikdy ani nezavolá síť --
-                        # cache-check výš (`cached_ul is not None`) ho
-                        # rovnou přeskočí.
-                        self._cf_cache.set(ck, {"found": False, "data": None})
-                        _ul_skipped_empty += 1
-                        log.info(
-                            f"user-CF userlist uid={uid} ({name}): request "
-                            f"selhal natrvalo (pravděpodobně privátní/smazaný "
-                            f"účet) -- cachuju jako prázdný, přeskočeno bez "
-                            f"ztráty místa v top_users"
-                        )
-                    else:
-                        # Dočasné selhání (5xx/timeout/vyčerpaný rate limit) —
-                        # NEUKLÁDÁME, tento uživatel se vynechá v tomto běhu,
-                        # ale příští spuštění to zkusí znovu (cache zůstává
-                        # prázdná = cache miss).
-                        _ul_failed_transient += 1
-                        log.warning(
-                            f"user-CF userlist uid={uid} ({name}): request "
-                            f"dočasně selhal, cache nezměněna, uživatel vynechán"
-                        )
+                raw = e.get("score") or 0
+                if not raw:
+                    # Neohodnocený záznam (včetně dropnutého bez známky) --
+                    # nenese měřitelný signál; pro usercf.py to znamená
+                    # „nepokryto" (viz penalizace oblíbených).
                     continue
-                _ul_fetched += 1
-                collection = (result.data.get("data") or {}).get("MediaListCollection") or {}
-                _fmt       = (
-                    (collection.get("user") or {})
-                    .get("mediaListOptions", {})
-                    .get("scoreFormat", "UNKNOWN")
-                )
-                raw_entries: list = []
-                for _lst in collection.get("lists", []):
-                    for _e in _lst.get("entries", []):
-                        if _e.get("status") in ("PLANNING", "DROPPED"):
-                            continue
-                        _raw = _e.get("score") or 0
-                        if not _raw:
-                            continue
-                        _media   = _e.get("media") or {}
-                        _mid     = _media.get("idMal")
-                        _avg_raw = _media.get("averageScore") or 0
-                        _title   = (_media.get("title") or {}).get("romaji", "")
-                        if _mid and _avg_raw > 0:
-                            raw_entries.append([_mid, _raw, _avg_raw, _title])
-                self._cf_cache.set(ck, {"found": True, "data": {"fmt": _fmt, "entries": raw_entries}})
-                if not raw_entries:
-                    # Úspěšný request, ale doopravdy nic použitelného (prázdný
-                    # seznam / nic ohodnoceného) -- taky nepočítat do good_users.
-                    _ul_skipped_empty += 1
-                    continue
-
-            good_users += 1
-
-            # Zpracuj záznamy (z cache nebo čerstvě stažené)
-            _div = _DIVISORS.get(_fmt)
-
-            # Osobní průměr — základ pro diferenciální skóre
-            _all_norms = [
-                max(0.0, min(1.0, raw / _div if _div else self._norm_score(raw)))
-                for _, raw, _, _ in raw_entries
-                if (raw / _div if _div else self._norm_score(raw)) > 0
-            ]
-            personal_avg = (sum(_all_norms) / len(_all_norms)) if _all_norms else 0.7
-
-            for mid, raw, avg_raw, title in raw_entries:
-                if mid in liked_set:
-                    continue
-                norm   = max(0.0, min(1.0,
-                    raw / _div if _div else self._norm_score(raw)
-                ))
-                c_norm = avg_raw / 100.0
-                diff   = norm - personal_avg
-                agg_diff[mid]  += sim * diff
-                agg_sim[mid]   += sim
-                rec_count[mid] += 1
-                if mid not in comm_norm and title:
-                    title_store[mid] = title
-                comm_norm[mid] = c_norm
-                rater_list[mid].append((sim, name))
-
-        progress_done(f"  user-CF: {good_users}/{top_users} použitelných uživatelů "
-                      f"(prošel {j}/{max_attempts} kandidátů)")
-        log.info(
-            f"user-CF userlist: {_ul_cache_hits} z cache, "
-            f"{_ul_fetched} staženo, {_ul_failed_transient} dočasně selhalo, "
-            f"{_ul_skipped_empty} bez dat (privátní/smazaní/prázdní) — "
-            f"{good_users} použitelných z {j} zkusených ({m} v poolu)"
-        )
-        if _ul_failed_transient:
-            print(
-                f"  user-CF: {_ul_failed_transient} uživatelů dočasně selhalo (viz log) "
-                f"— zkusí se znovu při příštím spuštění"
-            )
-        if good_users < top_users and j >= max_attempts:
-            log.warning(
-                f"user-CF: dosaženo stropu {max_attempts} pokusů (scan_budget_factor="
-                f"{scan_budget_factor}) a získáno jen {good_users}/{top_users} "
-                f"použitelných uživatelů -- zvaž vyšší scan_budget_factor, "
-                f"min_overlap, nebo větší candidate pool (podíl bez dat: "
-                f"{_ul_skipped_empty}/{j})"
-            )
-
-        # 6. Finální CF skóre a filtrování.
-        #    weighted_diff = Σ(sim×diff)/Σ(sim)  – vážený průměr diferenciálů
-        #    cf_score = community + weighted_diff  (0–1 → *10 na vstup do bump)
-        #    Práh: aspoň 2 nezávislí doporučitelé, kladné cf_score.
-        out = []
-        for mid in agg_diff:
-            if rec_count[mid] < 2:
-                continue
-            c       = comm_norm.get(mid, 0.5)
-            w_diff  = agg_diff[mid] / agg_sim[mid] if agg_sim[mid] else 0.0
-            # Aditivní bonus za počet hodnotitelů (max ≈ +0.10 pro 10+ uživatelů).
-            # Záměrně malý a aditivní — nechceme násobit diff, jen jemně upřednostnit
-            # tituly doporučené více spřízněnými dušemi před těmi s jediným.
-            n_bonus = 0.03 * math.log1p(max(0, rec_count[mid] - 2))
-            cf_raw  = max(0.0, c + w_diff + n_bonus)
-            # top raters (nejpodobnější, kteří tento titul hodnotili)
-            top_r   = sorted(rater_list[mid], key=lambda x: -x[0])[:5]
-            out.append({
-                "mal_id":       mid,
-                "score":        cf_raw * 10.0,   # pro bump() — může být > 10
-                "cf_score":     cf_raw * 10.0,
-                "community":    c * 10.0,
-                "diff":         w_diff * 10.0,
-                "n_users":      rec_count[mid],
-                "top_raters":   [(name, round(sim, 3)) for sim, name in top_r],
-                "title":        title_store.get(mid, ""),
-            })
-
-        # Seřaď primárně dle cf_score
-        out.sort(key=lambda x: -x["cf_score"])
-        log.info(f"user-CF: {len(out)} kandidátů z {good_users} použitelných uživatelů")
-        return out
+                avg = media.get("averageScore") or 0
+                if avg > 0:
+                    entries.append([mid, raw, avg,
+                                    (media.get("title") or {}).get("romaji", "")])
+        return Result.success({"fmt": fmt, "entries": entries,
+                               "planning": planning})

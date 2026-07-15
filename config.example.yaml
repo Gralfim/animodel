@@ -46,7 +46,20 @@ recommend:
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
   top_n: 40
   use_user_cf: false        # user-based CF přes AniList (pomalé)
-  user_cf_min_overlap: 4    # min. počet sdílených nišových seedů s uživatelem
-  user_cf_top_users: 120    # kolik nejpodobnějších uživatelů použít
-  user_cf_seed_count: 25    # kolik nejméně populárních titulů použít jako seed
-  user_cf_users_per_seed: 100  # kolik uživatelů stáhnout na jeden seed
+  # senpai pipeline: discovery přes nišové tituly -> plné seznamy kandidátů
+  # -> podobnost na plném překryvu -> pár skutečných senpai
+  user_cf_seed_count: 50          # kolik nejméně populárních titulů k discovery
+  user_cf_users_per_seed: 100     # kolik sledujících vzorkovat na seed
+  user_cf_min_sample_overlap: 2   # min. sdílených nišových seedů pro kvalifikaci
+  user_cf_candidate_pool: 200     # kolik kandidátů vyhodnotit na plných seznamech
+  user_cf_senpai_count: 20        # kolik senpai vybrat
+  user_cf_min_full_overlap: 40    # min. společně ohodnocených titulů (plný překryv)
+  user_cf_shrink_k: 50.0          # smrštění podobnosti n/(n+K)
+  user_cf_fav_score: 9.0          # od jaké mé známky je titul „oblíbený"
+  user_cf_fav_miss_penalty: 0.3   # srážka skóre senpaie, který mé oblíbené nezná
+                                  # (ani z PTW); 0.3 = -30 % při nulovém pokrytí,
+                                  # 0 = vypnuto
+  user_cf_exclude_users: []       # AniList jména vyloučená z hledání senpai
+                                  # (vlastní/alt účty). Jméno z MAL exportu se
+                                  # vylučuje automaticky — tohle je pro případ,
+                                  # že máš na AniListu jinou přezdívku.
