@@ -121,7 +121,9 @@ class Enricher:
     def __init__(self, cfg, jikan: JikanClient = None, anilist: AniListClient = None,
                  shikimori: ShikimoriClient = None):
         self.cfg = cfg
-        self.jikan = jikan or (JikanClient(cfg.cache_dir) if cfg.enrich.use_jikan else None)
+        self.jikan = jikan or (
+            JikanClient(cfg.cache_dir, base_url=cfg.enrich.anime_api_base_url)
+            if cfg.enrich.use_jikan else None)
         self.anilist = anilist or (AniListClient(cfg.cache_dir) if cfg.enrich.use_anilist else None)
         self.shikimori = shikimori or (
             ShikimoriClient(f"{cfg.cache_dir}/shikimori") if cfg.enrich.use_shikimori else None

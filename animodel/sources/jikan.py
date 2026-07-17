@@ -1,9 +1,16 @@
 """
-jikan.py — Jikan API v4 klient s cachováním a rate limitingem
+jikan.py — klient pro Jikan-KOMPATIBILNÍ MAL API (Jikan v4 / Tenrai).
 
-Jikan je neoficiální REST API pro MyAnimeList.
-Dokumentace: https://docs.api.jikan.moe/
-Rate limit: ~3 requesty/sekundu (klient automaticky čeká)
+Původní zdroj byl Jikan (https://docs.api.jikan.moe/), ale od 2026-07 má
+trvalé 504 výpadky. Default base URL je proto Tenrai
+(https://api.tenrai.org/v1) -- 1:1 mirror Jikan v4 schématu za Cloudflare,
+ověřeno na všech endpointech, které tenhle klient používá. Base URL je
+konfigurovatelná (enrich.anime_api_base_url), takže přepnutí zpět na Jikan
+je jen změna configu -- schéma i cache klíče (dle endpointu, ne hostu) jsou
+společné. Název souboru/třídy zůstává "Jikan" kvůli zpětné kompatibilitě
+importů; jde o klienta pro *jikanovské schéma*, ne nutně jikan.moe.
+
+Rate limit: klient čeká REQUEST_DELAY mezi requesty (bezpečný interval).
 """
 
 import time
@@ -22,7 +29,9 @@ from .http import (
 
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://api.jikan.moe/v4"
+# Default zdroj MAL dat. Historicky "https://api.jikan.moe/v4"; přepíná se
+# přes EnrichCfg.anime_api_base_url (viz config.example.yaml pro obě URL).
+BASE_URL = "https://api.tenrai.org/v1"
 REQUEST_DELAY = 0.4          # sekundy mezi requesty (bezpečný interval)
 RETRY_DELAYS = [2, 5, 10, 30]  # exponenciální backoff; 429 = len()+1 pokusů,
                                 # ostatní dočasné chyby = len() pokusů (poslední
@@ -30,10 +39,12 @@ RETRY_DELAYS = [2, 5, 10, 30]  # exponenciální backoff; 429 = len()+1 pokusů,
 
 
 class JikanClient:
-    def __init__(self, cache_dir: str = "cache", sleep: Callable[[float], None] = time.sleep):
+    def __init__(self, cache_dir: str = "cache", sleep: Callable[[float], None] = time.sleep,
+                 base_url: str = BASE_URL):
         self._cache = FileCache(Path(cache_dir))
         self._rate_limiter = FixedRateLimiter(REQUEST_DELAY)
         self._sleep = sleep
+        self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "anime-taste-model/1.0"
 
@@ -56,13 +67,13 @@ class JikanClient:
 
     def _request(self, endpoint: str):
         """Čistě síťová vrstva -- BEZ cache. Vrací Result(ok, data, permanent)."""
-        url = f"{BASE_URL}/{endpoint}"
+        url = f"{self.base_url}/{endpoint}"
         return request_with_retry(
             perform=lambda: self.session.get(url, timeout=15),
             classify=lambda resp: self._classify(resp, url),
             rate_limiter=self._rate_limiter,
             retry_delays=RETRY_DELAYS,
-            label="Jikan",
+            label="MAL-API",
             sleep=self._sleep,
         )
 

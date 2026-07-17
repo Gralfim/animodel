@@ -222,7 +222,7 @@ animodel/
     __init__.py     sdílené utility (progress výpisy, Result typ pro úspěch/selhání)
     cache.py        sdílený cache primitiv (FileCache, cached_fetch) -- 1 klíč = 1 soubor
     http.py         sdílený retry/backoff driver (request_with_retry, rate limitery)
-    jikan.py        MAL data + recommendations + search (přes Jikan)
+    jikan.py        MAL data + recommendations + search (Jikan-kompat. API: Tenrai/Jikan)
     anilist.py      AniList tagy + recommendations + tag-search + user-based CF
     shikimori.py    volitelný zdroj "podobných anime" (/similar), default vypnuto
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
@@ -284,6 +284,13 @@ animodel_test_harness.py`), ne přes pytest.
 
 ## Pozn. k datům
 
-Jikan i AniList jsou veřejná API s rate-limity; respektuj je (klient cachuje).
-Komunitní skóre se bere primárně z MAL, fallback AniList — záměrně se **neprůměrují**
-(jsou silně korelované, průměrování nepřináší informaci a riskuje zkreslení).
+MAL data se tahají z **Jikan-kompatibilního API**. Default je
+[Tenrai](https://tenrai.org/) (`https://api.tenrai.org/v1`) — spolehlivá náhrada
+Jikanu s identickým v4 schématem; původní Jikan (`https://api.jikan.moe/v4`) měl
+od července 2026 trvalé 504 výpadky. Přepnutí je jen změna
+`enrich.anime_api_base_url` v configu (cache je společná — klíč dle endpointu,
+ne hostu). AniList je druhý, nezávislý zdroj (tagy, rec graf, user-CF).
+
+Všechna API mají rate-limity; respektuj je (klient cachuje). Komunitní skóre se
+bere primárně z MAL, fallback AniList — záměrně se **neprůměrují** (jsou silně
+korelované, průměrování nepřináší informaci a riskuje zkreslení).

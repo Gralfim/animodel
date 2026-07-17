@@ -22,7 +22,12 @@ model:
 
 enrich:
   use_jikan: true           # false = nouzový AniList-only režim (viz --no-jikan);
-                            # hodí se při výpadku Jikan API
+                            # hodí se při výpadku obou MAL API zdrojů
+  # Zdroj MAL dat (Jikan-kompatibilní schéma). Default Tenrai — spolehlivější
+  # náhrada Jikanu (identické schéma, společná cache). Pro přepnutí zpět na
+  # Jikan stačí odkomentovat druhý řádek:
+  anime_api_base_url: https://api.tenrai.org/v1
+  # anime_api_base_url: https://api.jikan.moe/v4
   use_anilist: true
   anilist_min_rank: 30      # ignoruj okrajové AniList tagy (rank < 30 %)
   include_studios: true

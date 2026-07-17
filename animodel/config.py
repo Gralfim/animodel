@@ -45,6 +45,12 @@ class EnrichCfg:
                                        # (--no-jikan): žánry/synopse/dekáda/
                                        # franšízy se berou z AniListu, MAL rec
                                        # graf se přeskočí. Pro výpadky Jikanu.
+    # MAL data (žánry/relations/rec graf/…) se tahají z Jikan-KOMPATIBILNÍHO
+    # API. Default je Tenrai -- 1:1 mirror Jikan v4 schématu, za Cloudflare,
+    # výrazně spolehlivější (Jikan má od 2026-07 trvalé 504). Cache je společná
+    # (klíč dle endpointu, ne hostu) a schéma identické, takže přepnutí je
+    # bezpečné i s teplou cache. Jikan zůstává jako fallback v config.example.
+    anime_api_base_url: str = "https://api.tenrai.org/v1"
     use_anilist: bool = True
     anilist_min_rank: int = 30        # ignoruj okrajové AniList tagy (rank < 30 %)
     include_studios: bool = True

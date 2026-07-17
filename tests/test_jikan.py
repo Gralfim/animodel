@@ -132,6 +132,40 @@ def test_get_genres_unwraps_data_and_caches(tmp_path, no_sleep):
     assert get.calls == 1
 
 
+def test_base_url_is_configurable_and_default_is_tenrai(tmp_path, no_sleep):
+    # default = Tenrai (spolehlivá náhrada Jikanu)
+    assert JikanClient(cache_dir=str(tmp_path), sleep=no_sleep).base_url \
+        == "https://api.tenrai.org/v1"
+
+    seen = {}
+    client = JikanClient(cache_dir=str(tmp_path), sleep=no_sleep,
+                         base_url="https://api.jikan.moe/v4/")   # trailing slash
+
+    def spy(url, timeout=15):
+        seen["url"] = url
+        return FakeResponse(200, {"data": {"mal_id": 9253, "title": "X"}})
+    client.session.get = spy
+
+    client.get_anime(9253)
+    # trailing slash se ořízne, endpoint se připojí přesně jednou
+    assert seen["url"] == "https://api.jikan.moe/v4/anime/9253/full"
+
+
+def test_cache_is_shared_across_base_urls(tmp_path, no_sleep):
+    """Cache klíč je dle endpointu, ne hostu -- teplá cache přežije přepnutí
+    Jikan <-> Tenrai (schéma je identické)."""
+    resp = FakeResponse(200, {"data": {"mal_id": 1, "title": "Steins;Gate"}})
+    tenrai, get = make_client(tmp_path, [resp], no_sleep)
+    assert tenrai.get_anime(1) == {"mal_id": 1, "title": "Steins;Gate"}
+
+    # jiná instance, jiné base_url, stejná cache složka -> cache hit, žádný request
+    jikan = JikanClient(cache_dir=str(tmp_path), sleep=no_sleep,
+                        base_url="https://api.jikan.moe/v4")
+    jikan.session.get = ScriptedGet([])   # spadne, kdyby šel na síť
+    assert jikan.get_anime(1) == {"mal_id": 1, "title": "Steins;Gate"}
+    assert jikan.session.get.calls == 0
+
+
 def test_get_recommendations_unwraps_entries(tmp_path, no_sleep):
     resp = FakeResponse(200, {"data": [
         {"entry": {"mal_id": 5, "title": "Y"}, "votes": 12},
