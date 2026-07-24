@@ -32,6 +32,8 @@ python -m animodel -e animelist.xml --shrinkage 12   # konzervativnější efekt
 python -m animodel -e animelist.xml --user-cf        # + user-based CF (pomalé)
 python -m animodel -e animelist.xml --analyze        # jen přehled franšízových skupin, bez modelu
 python -m animodel -e animelist.xml --gen-intensity  # (re)generace intensity.yaml (osa náročnosti)
+python -m animodel -e animelist.xml --season         # doporučení pro aktuální vysílanou sezónu
+python -m animodel -e animelist.xml --season 2026 summer  # konkrétní sezóna
 python -m animodel -e animelist.xml --verbose        # + rutinní retry/rate-limit hlášky (INFO)
 ```
 
@@ -185,6 +187,23 @@ Pro každý titul: originální i anglický název, synopse, odůvodnění (kter
 a které tvé oblíbené ho táhnou), MAL skóre, odhad tvého hodnocení jako interval,
 a do jaké tvé nálady patří.
 
+### Sezónní doporučení (`--season`)
+
+`python -m animodel -e animelist.xml --season` vygeneruje
+`recommendations_season.html` pro aktuální vysílanou sezónu (auto-detekce z data;
+nebo napevno `--season 2026 summer`). Dvě sekce:
+
+- **Pokračování tvých sérií** — nové řady sérií, jejichž předchozí díly hodnotíš
+  `≥ season_min_prequel_score` (default 7). Řazeno podle tvé známky předchozí řady.
+- **Nové tituly pro tebe** — zbytek sezóny řazený podle **taste_fit** (obsahová
+  shoda s modelem vkusu). Collaborative signály se tu nepoužívají — čerstvě
+  vysílané série nemají graf podobnosti ani hodnocení od senpai. Pokračování
+  série, kterou nemáš shlédnutou, se sem zařadí s poznámkou.
+
+U běžících sérií se zobrazí **datum posledního dílu**, dopočítané z AniList
+`nextAiringEpisode` + počtu epizod. Airing data se (na rozdíl od statických
+metadat) necachují — mění se týdně.
+
 ---
 
 ## Ladění (`config.yaml`)
@@ -228,6 +247,7 @@ animodel/
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
   intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
   usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
+  season.py         sezónní doporučení (--season): pokračování + nové tituly + finále
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
   taste.py          jádro: baseline, afinitní efekty, interakce, nálady, predikce

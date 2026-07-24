@@ -50,6 +50,9 @@ recommend:
   min_anilist_rec_rating: 3 # ignoruj AniList doporučení se slabším ratingem
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
   top_n: 40
+  season_min_prequel_score: 7.0  # od jaké mé známky předchozí řady se sezónní
+                                 # pokračování počítá jako „moje série" (--season)
+  season_top_new: 30             # kolik nových titulů v sezónním přehledu
   use_user_cf: false        # user-based CF přes AniList (pomalé)
   # senpai pipeline: discovery přes nišové tituly -> plné seznamy kandidátů
   # -> podobnost na plném překryvu -> pár skutečných senpai

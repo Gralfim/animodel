@@ -550,6 +550,56 @@ class AniListClient:
       }
     }"""
 
+    # Airing info pro výpočet data posledního dílu (sezónní doporučení).
+    # nextAiringEpisode dává PŘESNÝ čas dalšího dílu; finále dopočítá
+    # season.py z (episodes − nextEp)·7 dní.
+    QUERY_AIRING_BATCH = """
+    query ($ids: [Int]) {
+      Page(perPage: 50) {
+        media(idMal_in: $ids, type: ANIME) {
+          idMal
+          status
+          episodes
+          nextAiringEpisode { episode airingAt }
+          endDate { year month day }
+        }
+      }
+    }"""
+
+    def get_airing_batch(self, mal_ids: list[int]) -> dict[int, dict]:
+        """
+        Airing info pro dané MAL ID: {mal_id: {status, episodes, next_ep,
+        next_airing_at, end_date}}. **NEcachuje se** -- na rozdíl od
+        statických media dat se airing stav (nextAiringEpisode) mění týdně,
+        cache by rychle zastarala. ~1 dotaz na 50 titulů, levné.
+
+        end_date je (year, month, day) tuple nebo None. next_airing_at je
+        unix timestamp dalšího dílu nebo None.
+        """
+        out: dict[int, dict] = {}
+        for i in range(0, len(mal_ids), 50):
+            chunk = mal_ids[i:i + 50]
+            result = self._request(self.QUERY_AIRING_BATCH, {"ids": chunk})
+            if not result.ok:
+                continue
+            for m in (result.data.get("data", {}).get("Page", {}).get("media", []) or []):
+                mid = m.get("idMal")
+                if not mid:
+                    continue
+                nae = m.get("nextAiringEpisode") or {}
+                ed = m.get("endDate") or {}
+                end_date = ((ed.get("year"), ed.get("month"), ed.get("day"))
+                            if ed.get("year") and ed.get("month") and ed.get("day")
+                            else None)
+                out[mid] = {
+                    "status": m.get("status"),
+                    "episodes": m.get("episodes"),
+                    "next_ep": nae.get("episode"),
+                    "next_airing_at": nae.get("airingAt"),
+                    "end_date": end_date,
+                }
+        return out
+
     def _media_popularity(self, anilist_id: int, fallback_mal_id: int) -> int:
         """Počet uživatelů, kteří titul mají v listu. Z cache nebo dotazem."""
         media = self._cached_media(fallback_mal_id)

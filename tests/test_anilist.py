@@ -283,6 +283,30 @@ def test_user_animelist_keeps_scored_dropped_and_collects_planning(tmp_path, no_
     assert post.calls == 1
 
 
+def test_airing_batch_computes_fields_and_is_not_cached(tmp_path, no_sleep):
+    media = [
+        {"idMal": 1, "status": "RELEASING", "episodes": 12,
+         "nextAiringEpisode": {"episode": 3, "airingAt": 1_800_000_000},
+         "endDate": {"year": None, "month": None, "day": None}},
+        {"idMal": 2, "status": "FINISHED", "episodes": 12,
+         "nextAiringEpisode": None,
+         "endDate": {"year": 2026, "month": 9, "day": 20}},
+    ]
+    resp = FakeResponse(200, {"data": {"Page": {"media": media}}})
+    client, post = make_client(tmp_path, [resp, resp], no_sleep)
+
+    out = client.get_airing_batch([1, 2])
+    assert out[1]["next_ep"] == 3 and out[1]["episodes"] == 12
+    assert out[1]["next_airing_at"] == 1_800_000_000
+    assert out[1]["end_date"] is None
+    assert out[2]["end_date"] == (2026, 9, 20)
+
+    # NEcachuje se (airing stav se mění týdně) -> druhé volání jde znovu na síť
+    out2 = client.get_airing_batch([1, 2])
+    assert out2 == out
+    assert post.calls == 2
+
+
 def test_user_animelist_private_is_permanent_none(tmp_path, no_sleep):
     resp = FakeResponse(404, text='{"errors":[{"message":"Private User"}]}')
     client, post = make_client(tmp_path, [resp], no_sleep)

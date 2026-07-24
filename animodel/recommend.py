@@ -68,6 +68,11 @@ class Recommendation:
     synopsis: str = ""
     sources: list = field(default_factory=list)   # ['MAL-rec', 'AniList-rec', 'tag-search']
     user_cf_signal: float = 0.0   # skóre z user-based CF (oddělená složka)
+    # -- sezónní doporučení (season.py); u ostatních žebříčků zůstávají None --
+    finale_date: str | None = None    # datum posledního dílu (ISO), pokud známé
+    broadcast: str | None = None      # den vysílání (např. "Mondays")
+    airing_status: str | None = None  # RELEASING / FINISHED / NOT_YET_RELEASED
+    season_note: str | None = None    # např. "pokračování: X (tvá známka 9)"
 
 
 def _z(values: list[float]) -> dict:

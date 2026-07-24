@@ -121,6 +121,18 @@ def test_connection_error_exhausts_retries_and_is_not_cached(tmp_path, no_sleep)
     assert get.calls == attempts
 
 
+def test_get_season_paginates_until_no_next_page(tmp_path, no_sleep):
+    page1 = FakeResponse(200, {"data": [{"mal_id": 1}, {"mal_id": 2}],
+                               "pagination": {"has_next_page": True}})
+    page2 = FakeResponse(200, {"data": [{"mal_id": 3}],
+                               "pagination": {"has_next_page": False}})
+    client, get = make_client(tmp_path, [page1, page2], no_sleep)
+
+    out = client.get_season(2026, "Summer")   # velikost písmen se normalizuje
+    assert [a["mal_id"] for a in out] == [1, 2, 3]
+    assert get.calls == 2
+
+
 def test_get_genres_unwraps_data_and_caches(tmp_path, no_sleep):
     genres = [{"mal_id": 4, "name": "Comedy"}, {"mal_id": 8, "name": "Drama"}]
     resp = FakeResponse(200, {"data": genres})

@@ -359,6 +359,20 @@ def _rec_card(r, rank: int) -> str:
     comm = f'{r.community:.2f}' if r.community is not None else '—'
     syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
     src = " · ".join(_esc(s) for s in r.sources)
+    # sezónní řádek (finále / vysílání / poznámka o pokračování) -- u ostatních
+    # žebříčků jsou tato pole None, takže se nevykreslí nic
+    season_bits = []
+    if getattr(r, "season_note", None):
+        season_bits.append(f'<b>{_esc(r.season_note)}</b>')
+    fin = getattr(r, "finale_date", None)
+    if fin:
+        bcast = f" · {_esc(r.broadcast)}" if getattr(r, "broadcast", None) else ""
+        season_bits.append(f'📅 poslední díl: {_esc(fin)}{bcast}')
+    elif getattr(r, "airing_status", None) == "RELEASING":
+        bcast = f" · {_esc(r.broadcast)}" if getattr(r, "broadcast", None) else ""
+        season_bits.append(f'právě vysíláno (datum finále neznámé){bcast}')
+    season_line = (f'<div class="note" style="margin-top:6px;color:var(--acc2)">'
+                   f'{" &nbsp;·&nbsp; ".join(season_bits)}</div>') if season_bits else ""
     # oddělené CF signály (viz recommend.py: 4složkový kompozit) -- ukázat,
     # jen když jsou nenulové, ať karty bez daného zdroje nemají prázdné nuly
     cf_boxes = ""
@@ -379,6 +393,7 @@ def _rec_card(r, rank: int) -> str:
         f'{cf_boxes}'
         f'</div>'
         f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
+        f'{season_line}'
         f'{seeds}'
         + (f'<div class="syn">{syn}</div>' if syn else "")
         + f'<div class="src" style="margin-top:10px">zdroj: {src}</div>'
@@ -400,6 +415,44 @@ def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None
         parts.append(_rec_card(r, i))
 
     parts.append(_foot())
+    out = "\n".join(parts)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(out)
+    return out_path
+
+
+def render_season_html(sequels: list, new_titles: list, out_path: str,
+                       year: int, season: str, userinfo: dict = None) -> str:
+    """Sezónní doporučení: pokračování mých sérií + nové tituly pro tebe."""
+    _season_cs = {"winter": "Zima", "spring": "Jaro",
+                  "summer": "Léto", "fall": "Podzim"}
+    label = f"{_season_cs.get(season, season.title())} {year}"
+    parts = [_head(f"Sezóna {label} — animodel")]
+    parts.append('<p class="kicker">animodel · aktuální sezóna</p>')
+    parts.append(f'<h1>Co sledovat<br><em>ze sezóny {_esc(label)}</em></h1>')
+    parts.append(
+        f'<p class="lead">Pokračování sérií, které máš rád, a nové tituly '
+        f's vysokou shodou s tvým vkusem. U běžících sérií je uvedené '
+        f'datum posledního dílu, pokud je známé.</p>')
+
+    parts.append('<h2>Pokračování tvých sérií</h2>')
+    if sequels:
+        parts.append('<p class="note">Nové řady sérií, jejichž předchozí díly '
+                     'hodnotíš vysoko — seřazené podle tvé známky předchozí řady.</p>')
+        for i, r in enumerate(sequels, 1):
+            parts.append(_rec_card(r, i))
+    else:
+        parts.append('<p class="note">Žádná sledovaná série tuhle sezónu '
+                     'nepokračuje.</p>')
+
+    parts.append('<h2>Nové tituly pro tebe</h2>')
+    parts.append('<p class="note">Řazeno podle shody obsahu s tvým modelem vkusu '
+                 '(taste_fit). Collaborative signály se tu nepoužívají — čerstvě '
+                 'vysílané série je ještě nemají.</p>')
+    for i, r in enumerate(new_titles, 1):
+        parts.append(_rec_card(r, i))
+
+    parts.append(_foot(f"sezóna {season} {year}"))
     out = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out)

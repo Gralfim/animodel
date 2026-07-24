@@ -171,10 +171,28 @@ def run(args) -> int:
         print("[hotovo] (doporučení přeskočena)")
         return 0
 
-    print(f"[4/5] Hledám doporučení …")
     watched_ids = {e.mal_id for e in entries
                    if e.status in ("Completed", "Watching", "On-Hold", "Dropped")}
     ptw_ids = {e.mal_id for e in by_status.get("Plan to Watch", [])}
+
+    if args.season is not None:
+        from .season import build_season_view, parse_season_arg
+        year, season = parse_season_arg(args.season)
+        print(f"[4/4] Sezónní doporučení: {season} {year} …")
+        my_scores = {e.mal_id: float(e.score) for e in completed}
+        sequels, new_titles = build_season_view(
+            model, enr, my_scores, watched_ids, ptw_ids, year, season,
+            cfg.recommend, show_progress=True)
+        print(f"      {len(sequels)} pokračování tvých sérií · "
+              f"{len(new_titles)} nových titulů")
+        season_html = os.path.join(cfg.out_dir, "recommendations_season.html")
+        report.render_season_html(sequels, new_titles, season_html,
+                                  year, season, userinfo)
+        print(f"      → {season_html}")
+        print("[hotovo]")
+        return 0
+
+    print(f"[4/5] Hledám doporučení …")
     rec = Recommender(model, enr, cfg)
     # Stáhneme celý ohodnocený pool (bez ořezu) — globální view ho ořízne na top_n,
     # per-klastr view pak pro každou náladu ukáže vlastních top_per_cluster.
@@ -254,6 +272,10 @@ def main(argv=None) -> int:
                         "MAL rec graf se přeskočí")
     p.add_argument("--no-recommend", action="store_true", help="jen model, bez doporučení")
     p.add_argument("--user-cf", action="store_true", help="zapni user-based CF (pomalé)")
+    p.add_argument("--season", nargs="*", metavar="ROK SEZÓNA",
+                   help="doporučení pro vysílanou sezónu (pokračování tvých sérií "
+                        "+ nové tituly, s datem posledního dílu). Bez argumentu = "
+                        "aktuální sezóna; nebo napevno např. '--season 2026 summer'")
     p.add_argument("--analyze", action="store_true",
                    help="vypiš přehled nalezených franšízových skupin a skonči "
                         "(print_series_groups byla v kódu, ale bez cesty ven z CLI)")

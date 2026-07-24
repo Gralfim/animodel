@@ -165,6 +165,30 @@ class JikanClient:
 
         return results
 
+    def get_season(self, year: int, season: str) -> list[dict]:
+        """
+        Všechny tituly dané vysílané sezóny (Jikan/Tenrai /seasons/{y}/{s}).
+        `season` ∈ {winter, spring, summer, fall}. Stránkuje přes
+        has_next_page. Vrací list anime dicts (Jikan schéma: mal_id, title,
+        type, source, status, episodes, aired, broadcast, genres, …).
+
+        Cachuje se (přes _get) -- sezónní členství je stabilní; airing
+        detaily (datum finále) se berou zvlášť z AniListu, který se
+        NEcachuje (mění se týdně).
+        """
+        results = []
+        page = 1
+        while True:
+            data = self._get(f"seasons/{year}/{season.lower()}?page={page}")
+            if not data or "data" not in data:
+                break
+            results.extend(data["data"])
+            if not data.get("pagination", {}).get("has_next_page"):
+                break
+            page += 1
+            self._sleep(REQUEST_DELAY)
+        return results
+
     def list_all_staff(
         self,
         mal_ids: list[int],
