@@ -17,6 +17,7 @@ class _StubModel:
     u_mean = 8.0
     c_mean = 7.5
     clusters = []
+    cluster_feat_keys = set()
     effects = {}
     interactions = []
     triples = []

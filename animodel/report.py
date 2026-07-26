@@ -297,12 +297,25 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
             f'<span class="tag cat-{_esc(cat)}{" spoiler-item" if spoil else ""}">{_esc(lab)}</span>'
             for _key, lab, cat, _dist, spoil in c.signature[:6])
         mem = " · ".join(_esc(m[1]) for m in c.members[:6])
+        # Archetyp = člen nejblíž těžišti (viz taste.py). Doplňuje seznam níž,
+        # který je řazený podle ZNÁMKY, a ukazuje tedy nejlíp hodnocené členy,
+        # ne ty charakteristické.
+        arch_html = ""
+        if c.archetype:
+            a_id, a_title, a_cos = c.archetype
+            arch_html = (
+                f'<div class="note" style="margin-top:10px">nejtypičtější titul: '
+                f'<a href="https://myanimelist.net/anime/{a_id}" target="_blank">'
+                f'<b>{_esc(a_title)}</b></a> '
+                f'<span style="color:{MUT}">· shoda s jádrem {a_cos:.0%}</span></div>')
         parts.append(
             f'<div class="cl"><div class="name">{_esc(c.name)}</div>'
             f'<div class="meta">{c.size} titulů · průměr {c.mean_user_score:.1f} '
             f'· afinita {c.affinity:+.2f} &nbsp; {pill}</div>'
             f'<div>{sig}</div>'
-            f'<div class="note" style="margin-top:10px">{mem}</div></div>')
+            + arch_html
+            + f'<div class="note" style="margin-top:6px">'
+              f'<span style="opacity:.7">nejlépe hodnocené:</span> {mem}</div></div>')
 
     # metodika
     parts.append('<h2>Jak to model počítá</h2>')

@@ -287,23 +287,48 @@ class Recommender:
     # ── Skórování ──────────────────────────────────────────────────────────────
 
     def _cluster_fit(self, attrs: dict[str, AttrValue]) -> tuple[float, str]:
-        """Kosinová podobnost k nejbližšímu klastru × jeho AFINITA."""
+        """
+        Vážený kosinus k nejbližšímu JÁDRU nálady × jeho AFINITA.
+
+        Počítá se proti plnému těžišti klastru (`Cluster.centroid`) a jen
+        v prostoru nálady (`model.cluster_feat_keys`). Dřívější verze měla
+        dvě zkreslení (HODNOCENI_PROJEKTU.md §5.4):
+
+          1. jmenovatel bral VŠECHNY atributy kandidáta, včetně studia,
+             formátu, dekády a zdroje -- kategorií, které v klastrovém
+             prostoru vůbec nejsou. Bohatě otagovaný titul tak dostal nižší
+             podobnost bez ohledu na skutečnou shodu s náladou: při týchž
+             třech shodách 0,387 (10 atributů) vs. 0,183 (45). A protože
+             počet tagů nad prahem roste s popularitou, byl to systematický
+             posun proti dobře zdokumentovaným titulům.
+          2. podobnost se měřila jen proti šesti nejvýraznějším osám
+             (zobrazovací signatuře) a binárně -- váhy atributů (AniList
+             rank) se zahazovaly, takže okrajový tag vážil jako hlavní žánr.
+        """
         if not self.model.clusters:
             return 0.0, ""
-        present = set(attrs)
+        feat = self.model.cluster_feat_keys
+        if not feat:
+            return 0.0, ""
+        # kandidátský vektor v prostoru nálady, s vahami jako při fitu
+        vec = {k: av.weight for k, av in attrs.items()
+               if k in feat and av.weight}
+        if not vec:
+            return 0.0, ""
+        v_norm = math.sqrt(sum(w * w for w in vec.values()))
+
         best_sim, best_name, best_aff = 0.0, "", 0.0
         for c in self.model.clusters:
-            # klíč je teď přímo v signature (viz taste.py::_fit_clusters) --
-            # dřív se tady dělal lineární průchod přes VŠECHNY self.model.effects
-            # pro každou položku signatury, pro každý klastr, pro každého
-            # kandidáta v recommend() -- na stovkách efektů × stovkách/tisících
-            # kandidátů zbytečně drahé, a ke všemu křehké (shoda podle
-            # label+category by teoreticky mohla trefit jiný klíč).
-            sig_keys = {sig[0] for sig in c.signature}
-            if not sig_keys:
+            if not c.centroid_norm:
                 continue
-            inter = len(present & sig_keys)
-            sim = inter / math.sqrt(len(sig_keys) * max(1, len(present)))
+            dot = 0.0
+            for k, w in vec.items():
+                coord = c.centroid.get(k)
+                if coord:
+                    dot += w * coord
+            if dot <= 0:
+                continue
+            sim = dot / (v_norm * c.centroid_norm)
             if sim > best_sim:
                 best_sim, best_name, best_aff = sim, c.name, c.affinity
         # Váž podobnost klastrovou AFINITOU (vážený průměr reziduí členů) --
@@ -348,7 +373,7 @@ class Recommender:
             # se dvěma ne -- poměr faktorů je právě to, co CV zjistila.
             raw_resid = self.model.affinity(en.attrs)
             cfit, cname = self._cluster_fit(en.attrs)
-            taste_fit = raw_resid + 0.5 * cfit
+            taste_fit = raw_resid + self.rc.cluster_fit_weight * cfit
             rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname))
 
         if not rows:

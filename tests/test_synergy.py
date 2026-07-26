@@ -143,8 +143,9 @@ def test_cluster_affinity_is_weighted_mean_of_residuals():
 class _StubModel:
     u_mean = 8.0
 
-    def __init__(self, clusters):
+    def __init__(self, clusters, feat_keys=("comedy", "drama")):
         self.clusters = clusters
+        self.cluster_feat_keys = set(feat_keys)
 
 
 class _StubEnricher:
@@ -154,9 +155,12 @@ class _StubEnricher:
 
 
 def _cluster(name, sig_key, mean_score, affinity):
+    """Klastr s jednoosým těžištěm -- kandidát nesoucí právě `sig_key` má
+    proti němu kosinus 1.0, takže testy izolují vliv afinity."""
     return Cluster(idx=0, name=name, size=10, mean_user_score=mean_score,
                    intensity=0.0, signature=[(sig_key, sig_key.title(), "genre", 0.5, False)],
-                   members=[], affinity=affinity)
+                   members=[], affinity=affinity,
+                   centroid={sig_key: 1.0}, centroid_norm=1.0)
 
 
 def test_cluster_fit_weights_by_affinity_not_raw_score():
@@ -175,6 +179,204 @@ def test_cluster_fit_weights_by_affinity_not_raw_score():
     # vysoké mean_user_score klastru už NEpomáhá -- rozhoduje afinita
     assert fit_lo == pytest.approx(1.0 * (-0.2 + 1.0))
     assert fit_hi > fit_lo
+
+
+# ── §5.4: kosinus proti PLNÉMU těžišti, jen v prostoru nálady ───────────
+
+def _centroid_cluster(name, centroid, affinity=0.0):
+    norm = math.sqrt(sum(v * v for v in centroid.values()))
+    return Cluster(idx=0, name=name, size=10, mean_user_score=8.0,
+                   intensity=0.0,
+                   signature=[(k, k.title(), "tag", 0.5, False) for k in centroid],
+                   members=[], affinity=affinity,
+                   centroid=dict(centroid), centroid_norm=norm)
+
+
+def _rec_with(clusters, feat_keys, cfg=None):
+    return Recommender(_StubModel(clusters, feat_keys), _StubEnricher(),
+                       cfg or Config())
+
+
+def test_cluster_fit_ignores_attributes_outside_mood_space():
+    """JÁDRO §5.4: studio/formát/dekáda v klastrovém prostoru nejsou, takže
+    nesmí zvětšovat jmenovatel kosinu. Dřív bohatě otagovaný titul dostal
+    nižší podobnost bez ohledu na skutečnou shodu s náladou."""
+    c = _centroid_cluster("M", {"comedy": 1.0})
+    rec = _rec_with([c], {"comedy"})
+    bare = {"comedy": AttrValue("genre", 1.0, "Comedy")}
+    rich = dict(bare,
+                **{"studio_x": AttrValue("studio", 1.0, "Studio X"),
+                   "tv": AttrValue("format", 1.0, "TV"),
+                   "2010s": AttrValue("decade", 1.0, "2010s"),
+                   "manga": AttrValue("source", 1.0, "Manga")})
+    assert rec._cluster_fit(bare)[0] == pytest.approx(rec._cluster_fit(rich)[0])
+
+
+def test_cluster_fit_uses_attribute_weights_not_binary_membership():
+    """Okrajový tag (nízký AniList rank) nesmí vážit jako hlavní žánr."""
+    c = _centroid_cluster("M", {"a": 1.0, "b": 1.0})
+    rec = _rec_with([c], {"a", "b"})
+    strong = rec._cluster_fit({"a": AttrValue("tag", 1.0, "A"),
+                               "b": AttrValue("tag", 1.0, "B")})[0]
+    weak = rec._cluster_fit({"a": AttrValue("tag", 1.0, "A"),
+                             "b": AttrValue("tag", 0.1, "B")})[0]
+    assert strong > weak
+
+
+def test_cluster_fit_sees_whole_centroid_not_just_signature():
+    """Podobnost se počítá proti celému profilu nálady. Atribut, který je
+    v těžišti ale mimo zobrazovací top-6 signaturu, musí přispívat."""
+    c = _centroid_cluster("M", {"a": 1.0, "hidden": 1.0})
+    c.signature = [("a", "A", "tag", 0.5, False)]      # 'hidden' není vidět
+    rec = _rec_with([c], {"a", "hidden"})
+    with_hidden = rec._cluster_fit({"a": AttrValue("tag", 1.0, "A"),
+                                    "hidden": AttrValue("tag", 1.0, "H")})[0]
+    only_a = rec._cluster_fit({"a": AttrValue("tag", 1.0, "A")})[0]
+    assert with_hidden > only_a          # shoda ve dvou osách > v jedné
+    assert with_hidden == pytest.approx(1.0)   # vektor rovnoběžný s těžištěm
+
+
+def test_cluster_fit_picks_cluster_with_highest_cosine():
+    a = _centroid_cluster("A", {"x": 1.0, "y": 0.1}, affinity=0.0)
+    b = _centroid_cluster("B", {"x": 0.1, "y": 1.0}, affinity=0.0)
+    rec = _rec_with([a, b], {"x", "y"})
+    assert rec._cluster_fit({"y": AttrValue("tag", 1.0, "Y")})[1] == "B"
+    assert rec._cluster_fit({"x": AttrValue("tag", 1.0, "X")})[1] == "A"
+
+
+def test_cluster_fit_zero_without_overlap_in_mood_space():
+    c = _centroid_cluster("M", {"comedy": 1.0})
+    rec = _rec_with([c], {"comedy"})
+    fit, name = rec._cluster_fit({"studio_x": AttrValue("studio", 1.0, "X")})
+    assert (fit, name) == (0.0, "")
+
+
+def test_fit_clusters_stores_centroid_and_mood_space():
+    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+        _cluster_titles(), n_clusters=2)
+    assert m.cluster_feat_keys                      # prostor nálady existuje
+    for c in m.clusters:
+        assert c.centroid, "těžiště se musí uchovat pro _cluster_fit"
+        assert set(c.centroid) <= m.cluster_feat_keys
+        expect = math.sqrt(sum(v * v for v in c.centroid.values()))
+        assert c.centroid_norm == pytest.approx(expect)
+
+
+def test_archetype_is_member_closest_to_centroid():
+    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+        _cluster_titles(), n_clusters=2)
+    member_ids = {mid for c in m.clusters for mid, _t, _s in c.members}
+    for c in m.clusters:
+        assert c.archetype, "každá nálada má mít archetyp"
+        a_id, a_title, a_cos = c.archetype
+        assert a_id in {mid for mid, _t, _s in c.members}   # člen TÉHOŽ klastru
+        assert a_id in member_ids
+        assert 0.0 < a_cos <= 1.0 + 1e-9
+        assert a_title
+
+
+def _sparse_trap_titles(seed=5):
+    """Nálada s ROZPTÝLENÝM těžištěm + degenerovaní členové.
+
+    Reprodukuje podmínku naměřenou na reálných datech: členové mají hodně,
+    málo se překrývajících atributů (těžiště je proto difuzní, každá
+    souřadnice malá), a proti nim stojí tituly nesoucí JEN dominantní osu.
+    Směrový kosinus takový titul vyhodnotí jako nejtypičtější, i když
+    z nálady nepokrývá skoro nic (na živých datech vycházel archetypem
+    'Petit Special' s 1 atributem proti mediánu 10).
+
+    Pool sdílených atributů je potřeba proto, aby se do prostoru nálady
+    vůbec dostaly (`n_eff >= 4`); zcela unikátní tagy filtr efektů vyhodí
+    a v prostoru nálady by pak "plnohodnotný" člen měl taky jen 1 atribut.
+    """
+    rng = random.Random(seed)
+    pool = [f"p{j}" for j in range(10)]
+    titles = []
+    for i in range(8):
+        keys = ["comedy"] + rng.sample(pool, 8)
+        titles.append(Title(mal_id=100 + i, title=f"Full{i}", user_score=8.0,
+                            community=7.5,
+                            attrs={k: AttrValue("tag", 1.0, k) for k in keys}))
+    for i in range(8):
+        titles.append(Title(mal_id=200 + i, title=f"Sparse{i}", user_score=9.0,
+                            community=7.5,
+                            attrs={"comedy": AttrValue("tag", 1.0, "comedy")}))
+    for i in range(16):   # druhý klastr, ať je co dělit
+        titles.append(Title(mal_id=300 + i, title=f"Drama{i}", user_score=7.0,
+                            community=7.5,
+                            attrs={k: AttrValue("tag", 1.0, k)
+                                   for k in ("drama", "psychological",
+                                             "tragedy", "war")}))
+    return titles
+
+
+def _pure_cosine_pick(model, cluster):
+    """Koho by vybral ČISTÝ kosinus k těžišti, bez mediánového filtru."""
+    feat = sorted(model.cluster_feat_keys)
+    kidx = {k: i for i, k in enumerate(feat)}
+    by_id = {t.mal_id: t for t in model.titles}
+    cen_norm = cluster.centroid_norm
+    best, best_cos = None, -1.0
+    for mid, _t, _s in cluster.members:
+        attrs = by_id[mid].attrs
+        vec = {k: av.weight for k, av in attrs.items() if k in kidx}
+        if not vec:
+            continue
+        vn = math.sqrt(sum(w * w for w in vec.values()))
+        dot = sum(w * cluster.centroid.get(k, 0.0) for k, w in vec.items())
+        cos = dot / (vn * cen_norm) if cen_norm else 0.0
+        if cos > best_cos:
+            best, best_cos = by_id[mid].title, cos
+    return best, best_cos
+
+
+def test_archetype_skips_degenerate_sparse_members():
+    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+        _sparse_trap_titles(), n_clusters=2)
+    trap = [c for c in m.clusters
+            if any(t[1].startswith("Sparse") for t in c.members)]
+    assert trap, "fixture musí dát klastr s degenerovanými členy"
+    for c in trap:
+        # 1) test má zuby: čistý kosinus by degenerovaný titul SKUTEČNĚ vybral
+        pure, pure_cos = _pure_cosine_pick(m, c)
+        assert pure.startswith("Sparse"), (
+            f"fixture nereprodukuje past -- čistý kosinus vybral {pure!r}")
+        assert pure_cos > 0.8
+        # 2) implementace na ni nesedne
+        assert c.archetype
+        assert c.archetype[1].startswith("Full"), (
+            f"archetyp {c.archetype[1]!r} nese jen dominantní osu -- "
+            f"mediánový filtr nezabral")
+
+
+def test_archetype_falls_back_to_best_available_when_all_sparse():
+    """Mediánový práh nikdy nevyprázdní výběr: aspoň polovina členů ho
+    splní vždy, takže archetyp existuje i v klastru samých "chudých" titulů
+    a není potřeba žádná záložní větev."""
+    titles = [Title(mal_id=100 + i, title=f"Thin{i}", user_score=8.0,
+                    community=7.5,
+                    attrs={"comedy": AttrValue("tag", 1.0, "comedy")})
+              for i in range(20)]
+    titles += [Title(mal_id=300 + i, title=f"Drama{i}", user_score=7.0,
+                     community=7.5,
+                     attrs={k: AttrValue("tag", 1.0, k)
+                            for k in ("drama", "psychological", "tragedy")})
+               for i in range(20)]
+    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(titles, n_clusters=2)
+    for c in m.clusters:
+        assert c.archetype and c.archetype[1]
+
+
+def test_cluster_fit_weight_is_configurable():
+    """Dřív zadrátovaná 0.5 uprostřed recommend(); 0 musí nálady vypnout."""
+    cfg = Config()
+    assert cfg.recommend.cluster_fit_weight == 0.5
+    cfg.recommend.cluster_fit_weight = 0.0
+    c = _centroid_cluster("M", {"comedy": 1.0}, affinity=0.5)
+    rec = _rec_with([c], {"comedy"}, cfg)
+    # samotný _cluster_fit se nemění, váha se aplikuje až v recommend()
+    assert rec._cluster_fit({"comedy": AttrValue("genre", 1.0, "Comedy")})[0] > 0
+    assert rec.rc.cluster_fit_weight == 0.0
 
 
 # ── trojice (hierarchická synergie nad klastrovými signaturami) ─────────

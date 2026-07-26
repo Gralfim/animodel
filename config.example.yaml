@@ -45,6 +45,13 @@ recommend:
   candidates_per_seed: 25
   max_seeds: 40
   seeds_per_franchise: 2    # max. seedů z jedné franšízy (0 = bez limitu)
+  cluster_fit_weight: 0.5   # jak moc uvnitř taste_fit váží shoda s NÁLADOU
+                            # proti atributové afinitě (0 = nálady do řazení
+                            # nevstupují). Pozn.: od přechodu na kosinus proti
+                            # plnému těžišti klastru má tenhle člen ~1,5x větší
+                            # rozptyl než dřív, takže 0.5 dnes znamená silnější
+                            # vliv nálad než dřívější (zadrátovaná) 0.5;
+                            # původní poměr odpovídá cca 0.33
   w_taste_fit: 1.0          # váha shody s atributy/náladami
   w_cf: 0.8                 # váha grafu podobnosti („doporučili to tvé oblíbené")
   w_user_cf: 0.6            # váha user-based CF (podobní uživatelé) — vlastní složka

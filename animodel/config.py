@@ -77,6 +77,14 @@ class RecommendCfg:
     # z-skóre -- dřív sdílely jeden kbelík a šikmé rozdělení hlasů grafu
     # user-CF utopilo a přebilo i model vkusu (změřeno 2026-07: |příspěvek|
     # 6.4 vs 1.6; hlasy grafu se navíc před z-skórem tlumí log1p).
+    cluster_fit_weight: float = 0.5   # jak moc uvnitř taste_fit váží shoda s
+                                      # NÁLADOU (vážený kosinus k jádru klastru
+                                      # × jeho afinita) proti atributové afinitě:
+                                      # taste_fit = afinita + w · cluster_fit.
+                                      # Dřív to byla zadrátovaná 0.5 uprostřed
+                                      # recommend() -- jediné číslo ve skórování,
+                                      # které se nedalo ladit. 0 = nálady do
+                                      # řazení nevstupují.
     w_taste_fit: float = 1.0          # shoda s mými afinitními efekty + klastry
     w_cf: float = 0.8                 # graf podobnosti (MAL/AniList/Shikimori)
     w_user_cf: float = 0.6            # user-based CF (podobní uživatelé)

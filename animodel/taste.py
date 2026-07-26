@@ -124,11 +124,25 @@ class Cluster:
     mean_user_score: float
     intensity: float                 # −1 (lehké) … +1 (náročné)
     signature: list                  # [(key, label, category, distinctiveness, spoiler), ...]
+                                     # -- jen ZOBRAZOVACÍ výběr top-6 os klastru
     members: list                    # [(mal_id, title, user_score), ...] seřazeno
     affinity: float = 0.0            # vážený průměr REZIDUÍ členů: o kolik
                                      # náladu hodnotím nad baseline (komunita
                                      # + můj posun) -- synergický efekt celé
                                      # nálady, ne jen součtu jejích atributů
+    centroid: dict = field(default_factory=dict)  # {feat_key: souřadnice} pro
+                                     # NENULOVÉ složky těžiště klastru. Plný
+                                     # profil nálady, ne jen 6 slov signatury --
+                                     # recommend.py._cluster_fit na něm počítá
+                                     # vážený kosinus (viz HODNOCENI §5.4).
+    centroid_norm: float = 0.0       # ‖centroid‖₂, předpočítané (jmenovatel
+                                     # kosinu; kandidátů jsou tisíce)
+    archetype: tuple = ()            # (mal_id, titul, kosinus) člena NEJBLÍŽ
+                                     # těžišti = nejtypičtější představitel
+                                     # nálady. `members` je řazený podle
+                                     # ZNÁMKY, tedy ukazuje nejlíp hodnocené
+                                     # členy, ne ty charakteristické -- tohle
+                                     # je doplňuje, ne nahrazuje.
 
 
 class TasteModel:
@@ -175,6 +189,12 @@ class TasteModel:
                                           # trojicích -- kolik reálně přinesly
         self.resid_std: float = 1.0       # pro intervaly predikce
         self.clusters: list[Cluster] = []
+        self.cluster_feat_keys: set[str] = set()   # prostor "nálady" (genre/
+                                          # theme/tag/demographic s dost vzorky).
+                                          # Kandidátský vektor se na něj MUSÍ
+                                          # omezit -- studio/formát/dekáda do
+                                          # nálady nepatří a v kosinu by jen
+                                          # nafukovaly jmenovatel.
         self._n_clusters: int | None = None   # předává se fold-modelům, ať
                                               # klastrují stejným postupem
 
@@ -610,6 +630,7 @@ class TasteModel:
             self.clusters = []
             return
         kidx = {k_: i for i, k_ in enumerate(feat_keys)}
+        self.cluster_feat_keys = set(feat_keys)
 
         rows, meta = [], []
         for t in self.titles:
@@ -692,10 +713,52 @@ class TasteModel:
             aff = float(sum(w * self._resid[meta[i].mal_id]
                             for w, i in zip(w_sub, members_i)) / w_tot)
             name = " / ".join(s[1] for s in signature[:3]) or f"Klastr {c+1}"
+            # Těžiště se uchová CELÉ (nenulové složky), ne jen jako top-6
+            # signatura: _cluster_fit na něm počítá vážený kosinus, takže
+            # kandidát se poměřuje s plným profilem nálady. Dřív se ta
+            # informace zahazovala a podobnost se počítala jen proti šesti
+            # nejvýraznějším osám (HODNOCENI_PROJEKTU.md §5.4).
+            cen = {feat_keys[i]: float(centroid[i])
+                   for i in range(len(feat_keys)) if centroid[i] > 0}
+            cen_norm = math.sqrt(sum(v * v for v in cen.values()))
+
+            # Nejtypičtější člen ("archetyp"): nejvyšší kosinus k těžišti,
+            # ale JEN mezi členy, které nesou aspoň mediánový počet atributů
+            # nálady. Stejná metrika jako recommend.py::_cluster_fit, ať to,
+            # co report ukazuje jako jádro nálady, odpovídá tomu, podle čeho
+            # se kandidáti k náladám přiřazují.
+            #
+            # Proč ten filtr: kosinus je směrový, takže titul s JEDINÝM
+            # atributem, který je zároveň hlavní osou těžiště, dostane vysokou
+            # shodu, přestože z nálady nepokrývá skoro nic. Naměřeno: v jednom
+            # klastru vyhrával "Petit Special" s 1 atributem (medián 10) a
+            # korelace kosinu s počtem atributů tam byla −0,56. Medoid (nejvyšší
+            # průměrná podobnost ke členům) to NEŘEŠÍ -- titul nesoucí jen
+            # nejčastější atribut je podobný všem. Vážení pokrytím zas sklouzne
+            # k "titulu s nejvíc tagy". Mediánový práh je odvozený z dat (ne
+            # magická konstanta) a nikdy nevyprázdní výběr: aspoň polovina
+            # členů ho vždy splní, takže není potřeba žádná záložní větev.
+            arch = ()
+            if cen_norm > 0:
+                sims = (sub @ centroid) / cen_norm
+                n_mood = [int(np.count_nonzero(sub[j])) for j in range(len(members_i))]
+                thr = float(np.median(n_mood))
+                # Shoda kosinu je běžná (tituly s identickou sadou atributů) --
+                # rozhodne hlavní řada před vedlejším obsahem (vyšší franšízová
+                # váha) a pak lepší známka, ať archetypem není náhodné OVA.
+                best = max(
+                    range(len(members_i)),
+                    key=lambda j: (n_mood[j] >= thr,
+                                   round(float(sims[j]), 12), float(w_sub[j]),
+                                   meta[members_i[j]].user_score))
+                bt = meta[members_i[best]]
+                arch = (bt.mal_id, bt.title, float(sims[best]))
+
             clusters.append(Cluster(
                 idx=c, name=name, size=len(mem),
                 mean_user_score=mean_score, intensity=inten,
                 signature=signature, members=mem, affinity=aff,
+                centroid=cen, centroid_norm=cen_norm, archetype=arch,
             ))
         clusters.sort(key=lambda x: -x.size)
         self.clusters = clusters

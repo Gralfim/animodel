@@ -83,7 +83,17 @@ animodel proto **necílí na známku, ale na odchylku**:
    i **trojice nad jádry nálad**: kandidáti z klastrových signatur,
    hierarchický lift = zbytek nad singly a páry (žádné dvojité počítání).
 5. **Nálady (módy).** KMeans na normalizovaných atributových vektorech; počet
-   klastrů se volí podle siluety. Každý klastr dostane **osu náročnosti**
+   klastrů se volí podle siluety. Kandidát se k náladě přiřazuje **váženým
+   kosinem proti celému těžišti** klastru, a jen v prostoru nálady
+   (žánry/témata/tagy/demografie — studio, formát ani dekáda do nálady
+   nepatří). Tím přiřazení odpovídá tomu, jak klastry vznikly: shoda
+   s tím, co KMeans skutečně rozhodl, je 99,6 % (proti 85 %, když se
+   podobnost počítala jen proti šesti zobrazovaným osám). Každá nálada navíc
+   dostane **archetyp** — svého nejtypičtějšího představitele (člen nejblíž
+   těžišti), který ji v reportu pojmenuje konkrétním titulem; bere se jen mezi
+   členy s aspoň mediánovým počtem atributů nálady, aby archetypem nebyl
+   krátký special nesoucí jedinou dominantní osu.
+   Každý klastr dostane **osu náročnosti**
    (těžké drama/psycho vs. lehká komedie/slice-of-life) — to je ta „emocionální
    únava", kvůli které mezi módy přepínáš. Osu řídí **intensity lexikon**
    (`intensity.yaml`, viz níž): spojité hodnoty −1…+1 na atribut, generované
@@ -225,6 +235,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
 | `model.interaction_triples` | experiment: synergie trojic nad jádry nálad (vlastní kalibrovaná škála; CLI hlásí, kolik reálně přinesly) |
 | `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
+| `recommend.cluster_fit_weight` | váha shody s náladou uvnitř `taste_fit` (0 = nálady neřadí) |
 | `recommend.w_taste_fit / w_cf / w_user_cf / w_quality` | váhy 4 složek řazení doporučení |
 | `recommend.min_mal_rec_votes / min_anilist_rec_rating` | prahy síly hrany v grafu podobnosti |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů |

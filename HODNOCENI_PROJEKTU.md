@@ -20,12 +20,12 @@ padla: testy existují a jsou skutečné (**165 testů, 12,7 s, všechny zelené
 — což je u projektů tohohle typu vzácné — dokumentuje i **zamítnuté alternativy
 a proč**.
 
-> **Stav implementace (2026-07-26):** všech 8 krátkých oprav z §9 hotovo,
-> a k nim **§9.1 variantou (c)** — trojice mají vlastní kalibrovanou škálu a
-> fold-modely klastrují samy, takže do CV neprosakuje nic. Detaily u
-> jednotlivých nálezů. Testů 165 → **180**, všechny zelené; defaultní cesta
-> ověřena jako bitově identická s HEAD. Otevřené zůstávají §9.2, §9.3 a
-> rozvojové body §9.4–§9.8.
+> **Stav implementace (2026-07-26):** hotovo všech 8 krátkých oprav z §9,
+> **§9.1** variantou (c) (trojice mají vlastní kalibrovanou škálu, fold-modely
+> klastrují samy → do CV neprosakuje nic) a **§9.2** (vážený kosinus proti
+> plnému těžišti nálady). Detaily a naměřené dopady u jednotlivých nálezů.
+> Testů 165 → **187**, všechny zelené; defaultní cesta kalibrace ověřena jako
+> bitově identická s HEAD. Otevřené zůstává §9.3 a rozvojové body §9.4–§9.8.
 
 Zbývající nálezy nejsou architektonické, ale konkrétní a lokální. Čtyři, které
 bych řešil první:
@@ -39,8 +39,10 @@ bych řešil první:
    **OPRAVENO** — ~450 MB → ~5 MB (§5.2).
 3. ~~**Retry smyčka spí i po posledním pokusu.**~~ **OPRAVENO** — 240 s → 150 s
    na request s vyčerpaným rate limitem (§5.3).
-4. **`_cluster_fit` systematicky penalizuje bohatě otagované tituly** — tři
-   stejné shody dají 0,387 nebo 0,183 podle toho, kolik má kandidát atributů (§5.4).
+4. ~~**`_cluster_fit` systematicky penalizuje bohatě otagované tituly.**~~
+   **OPRAVENO**: vážený kosinus proti plnému těžiště v prostoru nálady.
+   Hlavní zisk nebyl v pořadí (top-10 beze změny), ale v **přiřazení nálady:
+   85,4 % → 99,6 %** shody s tím, co KMeans rozhodl (§5.4, §9.2).
 
 Dokumentace je nadprůměrná, ale má jedno konkrétní **zastaralé tvrzení**:
 Shikimori „naživo neověřeno" už neplatí — tvar odpovědi je v cache ověřený a
@@ -348,6 +350,50 @@ je jednořádkový: nespat, když `i == attempts - 1`.
 
 ### 5.4 `_cluster_fit` penalizuje bohatě otagované tituly — STŘEDNÍ
 
+> **Stav (2026-07-26): OPRAVENO (§9.2).** `Cluster` si uchová celé těžiště
+> (`centroid` + předpočítaná `centroid_norm`), model prostor nálady
+> (`cluster_feat_keys`), a `_cluster_fit` počítá **vážený kosinus** proti
+> plnému těžišti — jen v prostoru nálady a s vahami atributů. Odpadly obě
+> zkreslení: cizí kategorie (studio/formát/dekáda/zdroj) už nenafukují
+> jmenovatel a okrajový tag už neváží jako hlavní žánr. Magická 0,5
+> vytažena do `recommend.cluster_fit_weight`.
+>
+> **Naměřeno na tvých datech** (458 titulů, 5 nálad, 172 featur):
+>
+> | | starý | nový |
+> |---|---|---|
+> | korelace `cluster_fit` s počtem atributů | −0,092 | **+0,034** |
+> | shoda přiřazené nálady s tím, co rozhodl KMeans | 85,4 % | **99,6 %** |
+> | medián `cluster_fit` | 0,351 | 0,669 |
+> | sm. odchylka `0.5·cluster_fit` (vs. odchylka afinity) | 0,063 (19 %) | 0,094 (28 %) |
+>
+> Zkreslení tedy **existovalo a zmizelo**, ale byl slabší, než můj analytický
+> příklad níž naznačoval: v reálných datech titul s víc atributy zároveň trefí
+> víc klíčů signatury, takže se penalizace částečně sama vyruší — příklad
+> „2× rozdíl" držel počet shod na třech, což se nestává. Skutečný přínos je
+> jinde: **přiřazení nálady bylo dřív špatně u ~14 % titulů** a teď je
+> prakticky přesné. Není to náhoda — KMeans na L2-normalizovaných vektorech
+> je blízko sférickému k-means, takže kosinus k těžišti *je* (skoro) jeho
+> vlastní rozhodovací pravidlo.
+>
+> **Zamítnutá alternativa:** místo těžiště použít vektor distinktivity
+> (`centroid − globální průměr`), tedy to, čím se nálada *liší*. Vypadá
+> lákavě — těžiště jsou hustá (39–166 nenulových složek ze 172), takže skoro
+> každý titul má s každou náladou kladný přesah a relativní mezera mezi 1. a
+> 2. náladou je jen 26,8 % (proti 85,9 % u distinktivity). Ale změřeno:
+> distinktivita má shodu s KMeans jen **90,0 %**, tedy horší než těžiště.
+> Větší mezera ≠ lepší přiřazení; rozhoduje, jestli reprodukujeme skutečné
+> členství. Ponecháno těžiště.
+>
+> **Dopad na doporučení** (izolované A/B na reálném poolu 404 skórovaných
+> kandidátů, vše ostatní identické): top-10 **100 %** shodných, top-20 85 %,
+> top-40 92 %; medián posunu v pořadí 10 míst (p90 32, max 66). Řazení se
+> tedy nahoře skoro nehýbe — **viditelně se změnil hlavně štítek nálady**,
+> a to u 28 % kandidátů. Vedlejšek k rozvaze: člen nálady má při stejném
+> `w = 0.5` teď **1,51× větší** vliv na `taste_fit` (jiný rozsah kosinu);
+> původní poměr odpovídá `cluster_fit_weight ≈ 0.33`. Default zůstal 0,5 —
+> tichou změnu vážení bych do opravy nemíchal, ale je to teď ladicí páčka.
+
 `recommend.py:297`: `sim = inter / sqrt(len(sig_keys) · len(present))`
 
 `present` = **všechny** atributy kandidáta (včetně studia, formátu, dekády,
@@ -636,13 +682,22 @@ optimismus; (2) CV RMSE je podle vlastní metodiky projektu ta *špatná* metrik
 model má řadit, ne hádat číslo. Poctivě to rozhodne až §9.4 (zpětná vazba
 z historie).
 
-**9.2 Klastrová podobnost přes centroidy (§5.4).** V `_fit_clusters` uložit
-`centroid` vektor + `feat_keys` do `Cluster`; `_cluster_fit` pak počítá vážený
-kosinus kandidátova vektoru (jen genre/theme/tag/demographic, stejné váhy jako
-při fitu) proti centroidu. Odstraní to zkreslení podle bohatosti metadat, využije
-informaci, která se dnes zahazuje, a zároveň **zjemní** signál: dnes je to shoda
-s 6 slovy, pak by to byla shoda s celým profilem nálady. Zároveň vytáhnout
-magickou 0,5 z `taste_fit` do `config.model` (§1).
+**9.2 Klastrová podobnost přes centroidy (§5.4).** ✅ **HOTOVO 2026-07-26**,
+naměřené dopady v §5.4. Implementováno podle plánu (těžiště + prostor nálady
+v modelu, vážený kosinus, `cluster_fit_weight` místo zadrátované 0,5), navíc
+ověřena a zamítnuta varianta s distinktivitou. Testů 180 → **187**.
+
+Shrnutí přínosu: přiřazení nálady 85,4 % → **99,6 %** shody s KMeans,
+zkreslení podle počtu atributů odstraněno (−0,092 → +0,034), řazení nahoře
+stabilní (top-10 beze změny). Původní rozvaha:
+
+> V `_fit_clusters` uložit `centroid` vektor + `feat_keys` do `Cluster`;
+> `_cluster_fit` pak počítá vážený kosinus kandidátova vektoru (jen
+> genre/theme/tag/demographic, stejné váhy jako při fitu) proti centroidu.
+> Odstraní to zkreslení podle bohatosti metadat, využije informaci, která se
+> dnes zahazuje, a zároveň **zjemní** signál: dnes je to shoda s 6 slovy, pak
+> by to byla shoda s celým profilem nálady. Zároveň vytáhnout magickou 0,5
+> z `taste_fit` do configu (§1).
 
 **9.3 Neutrální z-skóre pro chybějící graf (§5.5).** `item_votes = None` u
 tag-search-only kandidátů, z-skóre počítat jen z nenulových. Obsahové discovery
@@ -662,6 +717,48 @@ známka doporučených titulů** — tedy validace *řazení*, ne predikce čís
 druhý krok: `w_taste_fit / w_cf / w_user_cf / w_quality` se pak dají ladit proti
 měřenému výsledku místo odhadem. To je posun od „model, který vypadá rozumně" k
 „model, o kterém vím, že funguje", a vstupní data pro to už existují.
+
+**9.2b Archetyp nálady** (doplněno 2026-07-26 na návrh uživatele) — ✅ HOTOVO.
+Každá nálada dostane **nejtypičtějšího představitele** (`Cluster.archetype`),
+který ji v `model.html` pojmenuje konkrétním titulem. Doplňuje to seznam členů,
+který je řazený podle **známky**, a ukazuje tedy nejlíp hodnocené členy, ne ty
+charakteristické; v kartě jsou proto teď oba, popsané („nejtypičtější titul" /
+„nejlépe hodnocené"). Metrika je tentýž kosinus k těžišti, jaký používá
+`_cluster_fit`, takže co report ukazuje jako jádro nálady, odpovídá tomu, podle
+čeho se přiřazují kandidáti.
+
+Výsledek na tvých datech:
+
+| nálada | archetyp | shoda |
+|---|---|---|
+| Slice of Life / Romance / Coming of Age | Kimi ni Todoke 3rd Season | 85 % |
+| Harem / Ecchi / Female Harem | Bokutachi wa Benkyou ga Dekinai! | 86 % |
+| Fantasy / Magic / Adventure | Dungeon ni Deai wo Motomeru… (DanMachi) | 70 % |
+| Comedy / Shounen / Chibi | Seitokai Yakuindomo Movie | 70 % |
+| Military / Cute Girls Doing Cute Things / School | Girls & Panzer: Saishuushou Part 1 | 88 % |
+
+**Nutná korekce naivní verze.** Čistý kosinus k těžišti vybíral u komediální
+nálady *„Kanojo, Okarishimasu Petit Special"* — titul s **jediným** atributem
+v prostoru nálady proti mediánu 10. Kosinus je směrový, takže titul nesoucí jen
+dominantní osu těžiště dosáhne vysoké shody, i když z nálady nepokrývá skoro
+nic; korelace kosinu s počtem atributů byla v tom klastru **−0,56**. Vyzkoušeno
+a zamítnuto:
+
+- **medoid** (nejvyšší průměrná podobnost ke všem členům) — *nepomohl*: titul
+  nesoucí jen nejčastější atribut je podobný všem, takže vyhrál znovu;
+- **kosinus × pokrytí těžiště** — sklouzlo k „titulu s nejvíc tagy": u komedie
+  vybralo Spy x Family (38 atributů, ale kosinus jen 0,54 a vůbec ne chibi).
+
+Použit **mediánový práh**: archetyp se hledá jen mezi členy s aspoň mediánovým
+počtem atributů nálady. Práh je odvozený z dat (ne magická konstanta), drží
+vysoký kosinus (0,70–0,88 napříč náladami) a nikdy nevyprázdní výběr — aspoň
+polovina členů ho splní vždy, takže není potřeba žádná záložní větev.
+
+Testy: past je reprodukovaná syntetickou fixture s rozptýleným těžištěm a
+`test_archetype_skips_degenerate_sparse_members` **nejdřív doloží, že čistý
+kosinus by degenerovaný titul opravdu vybral** (aby test nemohl zvacuovat) a
+teprve pak, že implementace na něj nesedne. První verze toho testu vacuous byla
+— čistý kosinus na ní vybíral správně, takže filtr netestovala vůbec.
 
 **9.5 Diagnostika kanonizace atributů (§6).** `--analyze-attrs`: vypsat klíče,
 které se liší jen málo (Levenshtein ≤2, nebo shodné po odstranění stop-slov) a
