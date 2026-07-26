@@ -22,9 +22,9 @@ různých klíčích).
 Rozpočet pokusů je ZÁMĚRNĚ ASYMETRICKÝ (odpovídá původnímu, v praxi
 ověřenému chování obou klientů):
 
-  - RATE_LIMITED (429): `len(retry_delays) + 1` pokusů, poslední delay
-    slouží i jako floor pro pokusy za koncem seznamu. Rate limit se
-    vyřeší sám -- čekat déle se vyplatí.
+  - RATE_LIMITED (429): `len(retry_delays) + 1` pokusů. Rate limit se
+    vyřeší sám -- čekat déle se vyplatí. Po POSLEDNÍM pokusu se ale
+    nespí (není na co čekat, hned se vrací failure).
   - RETRYABLE / síťová výjimka (5xx, timeout): `len(retry_delays)` pokusů,
     spí se jen `retry_delays[:-1]`. Při výpadku služby se cena násobí
     KAŽDÝM postiženým titulem v dávce (a enrich fáze nemá circuit
@@ -189,8 +189,21 @@ def request_with_retry(
 
         if outcome.kind == "rate_limited":
             rate_limiter.on_throttled()
-            floor = retry_delays[i] if i < len(retry_delays) else retry_delays[-1]
-            wait = max(floor, outcome.wait)
+            if i >= attempts - 1:
+                # Poslední pokus -- čekat před `return` níž nemá co změnit.
+                # Dřív se tu spalo retry_delays[-1] sekund a hned se to
+                # vzdalo: 90 s u AniListu, 30 s u MAL API, 10 s u Shikimori
+                # ZCELA nadarmo, a to na KAŽDÝ request s vyčerpaným rate
+                # limitem (viz HODNOCENI_PROJEKTU.md §5.3). Při throttlingu
+                # v CF fázi jde o tisíce requestů.
+                log.warning(
+                    f"{label}: rate limit nepolevil po {attempts} pokusech, vzdávám to"
+                )
+                break
+            # i < attempts-1 == len(retry_delays), takže index je vždy platný
+            # (dřívější `retry_delays[-1]` fallback pokrýval jen tenhle
+            # poslední pokus, který teď nespí vůbec).
+            wait = max(retry_delays[i], outcome.wait)
             log.info(f"{label}: rate limit (pokus {i+1}/{attempts}), čekám {wait}s…")
             sleep(wait)
             continue

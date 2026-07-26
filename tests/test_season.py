@@ -57,11 +57,11 @@ def test_finale_finished_uses_end_date():
 
 class FakeModel:
     """taste_fit = součet vah 'good' atributů (deterministické řazení)."""
-    def _raw_resid_pred(self, attrs):
+    def affinity(self, attrs):
         return sum(av.weight for k, av in attrs.items() if k == "good")
 
     def predict(self, attrs, community):
-        tf = self._raw_resid_pred(attrs)
+        tf = self.affinity(attrs)
         return 7.0 + tf, 6.5, 8.5, [(k, "genre", av.weight, False)
                                     for k, av in attrs.items()]
 

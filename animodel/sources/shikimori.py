@@ -4,9 +4,9 @@ shikimori.py — Shikimori (rusky mluvící obdoba MAL/AniList) klient, jen pro
 recommend.py::_gather_candidates o další, nezávislý zdroj kandidátů.
 
 Dokumentace: https://shikimori.one/api/doc
-Rate limit: nemám k dispozici přesné aktuální číslo z jejich docs (žádný
-síťový přístup v dev sandboxu) -- REQUEST_DELAY níž je konzervativní odhad,
-DOLAĎ podle skutečného chování při prvním ostrém běhu.
+Rate limit: nemám k dispozici přesné aktuální číslo z jejich docs --
+REQUEST_DELAY níž je konzervativní odhad. Při ostrém běhu (2026-07)
+nezpůsobil žádné 429, takže je spíš opatrný než těsný.
 
 Proč jen "similar", ne plnohodnotný klient jako Jikan/AniList: code review
 prověřil i tagy (Shikimori nemá nic bohatšího než základní žánry, spíš
@@ -36,7 +36,6 @@ from typing import Callable
 
 import requests
 
-from . import progress, progress_done
 from .cache import FileCache, cached_fetch
 from .http import (
     FixedRateLimiter, Attempt, attempt_success, attempt_permanent,
@@ -95,14 +94,19 @@ class ShikimoriClient:
         jen "nedostupné/nedohledatelné", stejná opatrnost jako u ostatních
         klientů v sources/ (viz get_anime v jikan.py).
 
-        POZN.: přesný tvar odpovědi (jestli obsahuje sílu/pořadí podobnosti,
-        nebo jen holý seznam) jsem si nemohl ověřit naživo (žádný síťový
-        přístup v dev sandboxu) -- kód počítá s tím, že je to prostý seznam
-        a váhuje podle POZICE v seznamu (dřívější = podobnější, běžná
-        konvence pro tenhle typ endpointu), ne podle nějakého skóre.
-        Zkontroluj skutečnou odpověď při prvním ostrém běhu a uprav, pokud
-        API vrací i explicitní sílu podobnosti -- to by bylo přesnější
-        než pozice.
+        TVAR ODPOVĚDI: OVĚŘENO naživo (2026-07-25, 41 odpovědí v cache).
+        Je to **prostý seznam** objektů s poli
+        `{id, name, russian, score, kind, episodes, episodes_aired,
+        aired_on, released_on, status, image, url}` -- tedy **žádné
+        explicitní skóre ani pořadí podobnosti**. Pozicové váhování
+        (`rank_hint = 1/(i+1)`, dřívější = podobnější) je proto potvrzeně
+        jediná dostupná varianta, ne provizorium.
+
+        Pozn. k síle signálu: seznamy bývají dlouhé (pozorováno až 133
+        položek), takže při `candidates_per_seed` ořezu klesne rank_hint
+        z 1,0 na ~0,04. Shikimori tedy přispívá hlavně NOVÝMI kandidáty,
+        pořadím už jen okrajově -- MAL/AniList rec graf dává na týchž
+        pozicích řádově vyšší váhy (log1p z hlasů).
         """
         data = self._get(f"animes/{mal_id}/similar")
         if not data:
@@ -115,15 +119,4 @@ class ShikimoriClient:
                     "title": item.get("name", ""),
                     "rank_hint": 1.0 / (i + 1),  # pozice v seznamu jako proxy síly, ne potvrzené skóre
                 })
-        return out
-
-    def batch_similar(self, mal_ids: list[int], show_progress=True) -> dict[int, list[dict]]:
-        out = {}
-        total = len(mal_ids)
-        for i, mid in enumerate(mal_ids):
-            out[mid] = self.get_similar(mid)
-            if show_progress and i % 5 == 0:
-                progress(f"  Shikimori podobná anime: {i}/{total}…")
-        if show_progress:
-            progress_done(f"  Shikimori podobná anime: hotovo ({total} seedů).")
         return out

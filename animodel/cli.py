@@ -152,8 +152,17 @@ def run(args) -> int:
         intensity=lexicon,
     )
     model.fit(titles, n_clusters=cfg.model.n_clusters)
-    print(f"      β={model.beta:+.2f} · CV RMSE {model.cv_rmse:.3f} "
+    print(f"      β={model.beta:+.2f} · scale {model.scale:.2f} · "
+          f"CV RMSE {model.cv_rmse:.3f} "
           f"(baseline {model.baseline_rmse:.3f}) · {len(model.clusters)} nálad")
+    if model.triples:
+        # Kalibrace teď běží AŽ PO fitu trojic, takže cv_rmse popisuje model,
+        # který doopravdy predikuje; rozdíl proti cv_rmse_no_triples je
+        # poctivá odpověď, jestli se experiment s trojicemi vyplácí.
+        delta = model.cv_rmse_no_triples - model.cv_rmse
+        print(f"      {len(model.triples)} trojic · scale_triples "
+              f"{model.scale_triples:.2f} · bez trojic by CV RMSE bylo "
+              f"{model.cv_rmse_no_triples:.3f} ({delta:+.4f})")
 
     unrated = model.unrated_intensity_attrs(top=12)
     if unrated:
@@ -248,8 +257,11 @@ def run(args) -> int:
 
         report.render_cf_recommendations_html(cf_recs, cf_html, userinfo, enr_data,
                                               watched_ids=watched_ids,
-                                              senpai=getattr(rec, "_cf_senpai", []))
-        print(f"      → {cf_html}  ({len(cf_recs)} CF titulů)")
+                                              senpai=getattr(rec, "_cf_senpai", []),
+                                              top=cfg.recommend.user_cf_report_top)
+        cap = cfg.recommend.user_cf_report_top
+        shown = min(len(cf_recs), cap) if cap else len(cf_recs)
+        print(f"      → {cf_html}  ({shown} z {len(cf_recs)} CF titulů)")
     elif cfg.recommend.use_user_cf:
         print("      [CF report přeskočen — žádné výsledky]")
 

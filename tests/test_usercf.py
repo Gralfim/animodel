@@ -7,7 +7,7 @@ import pytest
 from animodel.config import Config, RecommendCfg
 from animodel.usercf import (
     Senpai, _norm_score, _pearson, discover_candidates, evaluate_candidate,
-    evaluate_candidates, select_senpai, recommend_from_senpai,
+    evaluate_candidates, hydrate_entries, select_senpai, recommend_from_senpai,
     find_senpai_recommendations,
 )
 
@@ -21,6 +21,7 @@ class FakeClient:
         self.watchers = watchers or {}     # anilist_id -> [[uid, name, raw], ...]
         self.userlists = userlists or {}   # uid -> {"fmt", "entries"} | None
         self.list_calls = 0
+        self.fetched_uids = []             # pořadí a opakování stažení seznamů
 
     def _cached_media(self, mal_id):
         return self.media.get(mal_id)
@@ -33,6 +34,7 @@ class FakeClient:
 
     def get_user_animelist(self, uid):
         self.list_calls += 1
+        self.fetched_uids.append(uid)
         return self.userlists.get(uid)
 
 
@@ -120,7 +122,11 @@ def test_find_senpai_respects_exclude_users_from_config():
                       user_cf_shrink_k=1.0, user_cf_exclude_users=["gralfim"])
     senpai, _recs = find_senpai_recommendations(client, my, watched_ids=set(my), rc=rc)
     assert [s.name for s in senpai] == ["kamarad"]
-    assert client.list_calls == 1   # vlastní účet se ani nestahoval
+    # vlastní účet (uid 100) se ani nestahoval -- testuj přímo TO, ne počet
+    # volání: vybraným senpai se seznam ještě jednou dočte z cache
+    # (hydrate_entries), takže surový count není o vyloučení účtu
+    assert 100 not in client.fetched_uids
+    assert set(client.fetched_uids) == {101}
 
 
 def test_discovery_min_sample_overlap_one_lets_singles_in_rarity_order():
@@ -245,6 +251,61 @@ def test_scan_budget_caps_attempts():
                               scan_budget_factor=2.0)
     assert out == []
     assert client.list_calls == 20   # 10 * 2.0, ne všech 100
+
+
+# ── paměť: plné seznamy se drží jen pro vybrané senpai ───────────────────
+
+def test_evaluate_candidates_drops_entries_but_keeps_metrics():
+    """`entries` celého poolu je čirá zátěž -- na reálných datech medián
+    ~1000 položek/uživatel, takže pool 2000 znamenal ~450 MB zbytečně
+    držené paměti (HODNOCENI_PROJEKTU.md §5.2). Metriky pro select_senpai()
+    musí zůstat nedotčené."""
+    userlists = {
+        101: {"fmt": "POINT_10", "entries": [_entry(1, 8.0), _entry(2, 9.0)]},
+        102: {"fmt": "POINT_10", "entries": [_entry(1, 9.0), _entry(3, 7.0)]},
+    }
+    client = FakeClient(userlists=userlists)
+    cands = [(101, "a", 2.0, 2), (102, "b", 1.0, 2)]
+    out = evaluate_candidates(client, cands, {1: 9.0, 2: 8.0}, {1, 2},
+                              candidate_pool=2, shrink_k=50.0)
+    assert [s.entries for s in out] == [[], []]        # zahozeno
+    assert [s.n_rated for s in out] == [2, 2]          # metriky drží
+    assert [s.overlap for s in out] == [2, 1]
+    assert all(s.n_novel >= 0 for s in out)
+
+
+def test_evaluate_candidates_keep_entries_opt_in():
+    client = FakeClient(userlists={
+        101: {"fmt": "POINT_10", "entries": [_entry(1, 8.0)]},
+    })
+    out = evaluate_candidates(client, [(101, "a", 2.0, 2)], {1: 9.0}, {1},
+                              candidate_pool=1, shrink_k=50.0,
+                              keep_entries=True)
+    assert out[0].entries == [_entry(1, 8.0)]
+
+
+def test_hydrate_entries_refills_selected_from_cache():
+    client = FakeClient(userlists={
+        101: {"fmt": "POINT_10", "entries": [_entry(1, 8.0), _entry(5, 9.0)]},
+    })
+    s = _senpai(101, 0.5, 100)
+    s.entries = []
+    hydrate_entries(client, [s])
+    assert s.entries == [_entry(1, 8.0), _entry(5, 9.0)]
+    # už naplněné se znovu netahají
+    calls = client.list_calls
+    hydrate_entries(client, [s])
+    assert client.list_calls == calls
+
+
+def test_hydrate_entries_survives_missing_list():
+    """Kdyby seznam z cache mezitím zmizel, senpai zůstane bez entries --
+    recommend_from_senpai() ho pak jen přeskočí, nespadne."""
+    client = FakeClient(userlists={101: None})
+    s = _senpai(101, 0.5, 100)
+    s.entries = []
+    hydrate_entries(client, [s])
+    assert s.entries == []
 
 
 # ── výběr senpai ─────────────────────────────────────────────────────────

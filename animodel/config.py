@@ -113,6 +113,13 @@ class RecommendCfg:
                                       # Dropnutý-bez-známky se počítá jako nepokrytý;
                                       # dropnutý SE známkou je řádný (a výmluvný)
                                       # datový bod v podobnosti.
+    user_cf_report_top: int = 200     # strop počtu karet v cf_recommendations.html.
+                                      # Bez něj se renderoval KAŽDÝ titul, který
+                                      # aspoň 2 senpai ohodnotili -- při 20 senpai
+                                      # s mediánem ~1000 položek to dělalo tisíce
+                                      # karet a 8 MB HTML, které prohlížeč otevírá
+                                      # sekundy (HODNOCENI_PROJEKTU.md §5.8).
+                                      # 0 = bez stropu (původní chování).
     user_cf_exclude_users: list = field(default_factory=list)
                                       # AniList jména vyloučená z hledání senpai
                                       # (vlastní/alt účty -- import vlastního MAL

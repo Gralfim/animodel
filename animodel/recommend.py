@@ -258,11 +258,14 @@ class Recommender:
     def _user_cf(self, titles, seen_ids, bump):
         """User-based CF: senpai pipeline (viz usercf.py). Best-effort."""
         from .usercf import find_senpai_recommendations
+        from .sources import status
         rated = [t for t in titles if t.user_score and t.user_score > 0]
         user_scores = {t.mal_id: t.user_score for t in rated}
-        print(f"  user-CF: {len(user_scores)} ohodnocených titulů na vstupu, "
-              f"hledám {self.rc.user_cf_senpai_count} senpai "
-              f"z poolu {self.rc.user_cf_candidate_pool} kandidátů")
+        # status() místo print() -- spolupracuje s \r progress řádkou
+        # (uklidí ji, vypíše se, překreslí). Holý print() ji rozsekal.
+        status(f"  user-CF: {len(user_scores)} ohodnocených titulů na vstupu, "
+               f"hledám {self.rc.user_cf_senpai_count} senpai "
+               f"z poolu {self.rc.user_cf_candidate_pool} kandidátů")
         try:
             senpai, recs = find_senpai_recommendations(
                 self.enr.anilist, user_scores, watched_ids=seen_ids, rc=self.rc,
@@ -271,9 +274,15 @@ class Recommender:
             self._cf_raw_results = recs      # uloženo pro CF HTML report
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
-            print(f"  user-CF: {len(senpai)} senpai, {len(recs)} kandidátů přidáno")
-        except Exception as exc:
-            print(f"  user-CF: selhalo ({exc})")
+            status(f"  user-CF: {len(senpai)} senpai, {len(recs)} kandidátů přidáno")
+        except Exception:
+            # log.exception, ne print: CF fáze běží klidně hodiny a tohle je
+            # jediné místo, kde se o jejím pádu dozvíš. Holý print(exc) zahodil
+            # traceback -- programátorská chyba (KeyError apod.) pak vypadala
+            # identicky jako "senpai se nenašli" (HODNOCENI_PROJEKTU.md §5.6).
+            log.exception(
+                "user-CF selhalo -- doporučení pokračují bez user-CF složky"
+            )
 
     # ── Skórování ──────────────────────────────────────────────────────────────
 
@@ -333,7 +342,11 @@ class Recommender:
             if en.community is not None and en.community < self.rc.min_community:
                 continue
             pred, lo, hi, contribs = self.model.predict(en.attrs, en.community)
-            raw_resid = self.model._raw_resid_pred(en.attrs)   # afinitní část
+            # affinity() = KALIBROVANÁ afinitní část (scale na singly+páry,
+            # scale_triples na trojice). Dřív se tu bral neškálovaný součet;
+            # s jedním faktorem to bylo jedno (z-skóre konstantu vykrátí),
+            # se dvěma ne -- poměr faktorů je právě to, co CV zjistila.
+            raw_resid = self.model.affinity(en.attrs)
             cfit, cname = self._cluster_fit(en.attrs)
             taste_fit = raw_resid + 0.5 * cfit
             rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname))

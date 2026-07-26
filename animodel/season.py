@@ -95,7 +95,7 @@ def _make_rec(model, en, ptw: bool, airing: dict | None,
     return Recommendation(
         mal_id=en.mal_id, title=en.title, title_en=en.title_en,
         community=en.community, pred=pred, pred_lo=lo, pred_hi=hi,
-        taste_fit=model._raw_resid_pred(en.attrs), cf_signal=0.0,
+        taste_fit=model.affinity(en.attrs), cf_signal=0.0,
         composite=0.0, ptw=ptw, cluster_name="",
         why=contribs[:6], cf_seeds=[], synopsis=en.synopsis,
         sources=["season"],

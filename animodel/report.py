@@ -317,7 +317,10 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         '(malé vzorky táhnuté k nule koeficientem K). Atributy se objevují samy z dat — žádný ruční '
         'konfigurák.<br>'
         '<b>4. Nálady.</b> KMeans na normalizovaných atributových vektorech, počet klastrů dle siluety.<br>'
-        '<b>5. Kalibrace.</b> Globální škála a interval predikce z 5-násobné cross-validace.'
+        '<b>5. Kalibrace.</b> Globální škála a interval predikce z 5-násobné cross-validace. '
+        'Trojice (když jsou zapnuté) dostávají <i>vlastní</i> škálu — jsou jiný řád důkazů '
+        'než singly a páry, tak se i kalibrují zvlášť. Fold-modely přitom klastrují a hledají '
+        'trojice samy na svých 4/5 dat, aby do cross-validace neprosákla znalost testovací části.'
         '</p></div>')
     parts.append('<p class="note" style="margin-top:14px">CV RMSE modelu: '
                  f'<span class="mono">{model.cv_rmse:.3f}</span> vs. samotný baseline '
@@ -325,6 +328,21 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
                  'Že je rozdíl malý, není chyba — znamená to, že tvá známka ≈ komunita + konstantní '
                  'posun; atributy proto neslouží k hádání čísla, ale k tomu, <i>co</i> vybrat a do '
                  'jaké nálady to patří.</p>')
+
+    # Kalibrované škály + poctivá odpověď na "přinesly trojice něco?".
+    # Obojí měřené na TOMTO modelu (kalibrace běží až po fitu trojic).
+    cal = (f'Škála efektů <span class="mono">s&nbsp;=&nbsp;{model.scale:.2f}</span>')
+    if getattr(model, "triples", []):
+        delta = model.cv_rmse_no_triples - model.cv_rmse
+        verdict = (f'zlepšily CV RMSE o <span class="mono">{delta:.4f}</span>'
+                   if delta > 1e-9 else 'CV RMSE nezlepšily')
+        cal += (f', škála trojic '
+                f'<span class="mono">s<sub>3</sub>&nbsp;=&nbsp;{model.scale_triples:.2f}</span>. '
+                f'{len(model.triples)} trojic {verdict} '
+                f'(bez nich <span class="mono">{model.cv_rmse_no_triples:.3f}</span>).')
+    else:
+        cal += '.'
+    parts.append(f'<p class="note">{cal}</p>')
 
     parts.append(_foot(f"shrinkage K={model.K:g}"))
     out = "\n".join(parts)
@@ -601,7 +619,7 @@ def render_cluster_recommendations_html(
 
 
 def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
-    """Karta CF doporučeni. Kombinuje enr (Recommendation) a r_cf (raw CF dict)."""
+    """Karta CF doporučení. Kombinuje enr (Recommendation) a r_cf (raw CF dict)."""
     mid       = r_cf.get("mal_id")
     cf_score  = r_cf.get("cf_score", 0.0)
     community = r_cf.get("community", 0.0)
@@ -614,39 +632,39 @@ def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
     title_en = _esc((enr.title_en if enr else None) or r_cf.get("title_en", ""))
     if title_en == title:
         title_en = ""
-    ten  = f' \xb7 <span class="ten">{title_en}</span>' if title_en else ""
+    ten  = f' · <span class="ten">{title_en}</span>' if title_en else ""
     ptw  = enr.ptw if enr else False
-    # CF report je surov\u00fd pohled: shl\u00e9dnut\u00e9 tituly se z n\u011bj nefiltruj\u00ed
-    # (potvrzuj\u00ed shodu vkusu se sp\u0159\u00edzn\u011bn\u00fdmi du\u0161emi), jen se ozna\u010d\u00ed --
-    # do fin\u00e1ln\u00edch \u017eeb\u0159\u00ed\u010dk\u016f se na rozd\u00edl odsud nikdy nedostanou.
+    # CF report je surový pohled: shlédnuté tituly se z něj nefiltrují
+    # (potvrzují shodu vkusu se senpai), jen se označí -- do finálních
+    # žebříčků se na rozdíl odsud nikdy nedostanou.
     if watched:
-        flag = '<span class="flag seen">u\u017e shl\u00e9dnuto</span>'
+        flag = '<span class="flag seen">už shlédnuto</span>'
     elif ptw:
-        flag = '<span class="flag">na tve\u0301m PTW</span>'
+        flag = '<span class="flag">na tvém PTW</span>'
     else:
         flag = ""
     mal_url = f"https://myanimelist.net/anime/{mid}" if mid else "#"
 
-    # Skore sekce
+    # Skóre sekce
     cf_color   = ACCENT  if cf_score >= 9.0  else (ACCENT2 if cf_score >= 7.5 else MUT)
     diff_color = ACCENT  if diff >= 0         else NEG
-    comm_str   = f"{community:.2f}" if community else "\u2014"
+    comm_str   = f"{community:.2f}" if community else "—"
 
     scores_html = (
         f'<div class="scores">'
         f'<div class="s"><div class="n" style="color:{cf_color}">{cf_score:.2f}</div>'
-        f'<div class="k">CF sk\xf3re</div></div>'
+        f'<div class="k">CF skóre</div></div>'
         f'<div class="s"><div class="n">{comm_str}</div>'
-        f'<div class="k">AL pr\u016fm\u011br</div></div>'
+        f'<div class="k">AL průměr</div></div>'
         f'<div class="s"><div class="n" style="color:{diff_color}">{diff:+.2f}</div>'
-        f'<div class="k">\u0394 od pr\u016fm\u011bru</div></div>'
+        f'<div class="k">Δ od průměru</div></div>'
         + (f'<div class="s"><div class="n pos">{enr.pred:.1f}</div>'
-           f'<div class="k">pred. sk\xf3re ({enr.pred_lo:.1f}\u2013{enr.pred_hi:.1f})</div></div>'
+           f'<div class="k">pred. skóre ({enr.pred_lo:.1f}–{enr.pred_hi:.1f})</div></div>'
            if enr else "")
         + '</div>'
     )
 
-    # Spriznenene duse
+    # Senpai, kteří titul ohodnotili
     raters_html = ""
     if raters:
         names = ", ".join(
@@ -656,7 +674,7 @@ def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
         )
         raters_html = (
             f'<div class="note" style="margin-top:6px">'
-            f'sp\u0159\xedzn\u011bn\xe9 du\u0161e ({n_users}): {names}</div>'
+            f'senpai ({n_users}): {names}</div>'
         )
 
     # Proc / atributy z enr
@@ -669,13 +687,13 @@ def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
             why_parts.append(f'<span class="{cls}">{_esc(lab)}</span>')
         why = ", ".join(why_parts)
         cl  = f'<span class="tag">{_esc(enr.cluster_name)}</span>' if enr.cluster_name else ""
-        why_html = f'<div class="why"><b>Pro\u010d:</b> {why} &nbsp;{cl}</div>'
+        why_html = f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
 
     # Seeds z item-CF
     seeds_html = ""
     if enr and enr.cf_seeds:
         seeds_html = (
-            '<div class="note" style="margin-top:6px">proto\u017ee m\xe1\u0161 r\xe1d: '
+            '<div class="note" style="margin-top:6px">protože máš rád: '
             + ", ".join(f'<i>{_esc(s)}</i>' for s in enr.cf_seeds)
             + '</div>'
         )
@@ -684,14 +702,14 @@ def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
     syn_html = ""
     synopsis = (enr.synopsis if enr else "") or ""
     if synopsis:
-        syn = _esc(synopsis[:340] + ("\u2026" if len(synopsis) > 340 else ""))
+        syn = _esc(synopsis[:340] + ("…" if len(synopsis) > 340 else ""))
         syn_html = f'<div class="syn">{syn}</div>'
 
     # Zdroje
     sources = list(enr.sources) if enr else ["user-CF"]
     if "user-CF" not in sources:
         sources.append("user-CF")
-    src = " \xb7 ".join(_esc(s) for s in sources)
+    src = " · ".join(_esc(s) for s in sources)
 
     return (
         f'<div class="rec">'
@@ -716,41 +734,55 @@ def render_cf_recommendations_html(
     enr_data: dict = None,
     watched_ids: set = None,
     senpai: list = None,
+    top: int | None = None,
 ) -> str:
-    """Standalone HTML report pro vysledky user-based CF, karta-style."""
-    parts = [_head("CF doporu\u010den\xed \u2014 animodel")]
-    parts.append('<p class="kicker">animodel \xb7 user-based collaborative filtering</p>')
-    parts.append('<h1>Doporu\u010den\xed<br><em>od sp\u0159\xedzn\u011bn\xfdch du\u0161\xed</em></h1>')
+    """
+    Standalone HTML report pro výsledky user-based CF, karta-style.
+
+    `top` = strop počtu vykreslených karet (None/0 = bez stropu).
+    recommend_from_senpai() vrací KAŽDÝ titul, který aspoň 2 senpai
+    ohodnotili -- při 20 senpai to jsou tisíce položek a HTML v řádu MB,
+    které prohlížeč otevírá sekundy (HODNOCENI_PROJEKTU.md §5.8). Vstup je
+    už seřazený dle cf_score, takže ořez bere skutečnou špičku; v hlavičce
+    se hlásí obě čísla, ať je vidět, že se něco nezobrazuje.
+    """
+    shown = cf_recs[:top] if top else cf_recs
+    parts = [_head("CF doporučení — animodel")]
+    parts.append('<p class="kicker">animodel · user-based collaborative filtering</p>')
+    parts.append('<h1>Doporučení<br><em>od tvých senpai</em></h1>')
+    cap_note = (f' Zobrazeno&nbsp;{len(shown)}&nbsp;z&nbsp;{len(cf_recs)}'
+                f' (strop <code>user_cf_report_top</code>).'
+                if len(shown) < len(cf_recs) else '')
     parts.append(
         f'<p class="lead">'
-        f'{len(cf_recs)} titul\u016f nalezen\xfdch p\u0159es podobn\xe9 u\u017eivatele na AniList. '
-        f'CF sk\xf3re\xa0=\xa0pr\u016fm\u011br komunity\xa0+\xa0v\xe1\u017een\xe1 odchylka sp\u0159\xedn\u011bn\xfdch du\u0161\xed. '
-        f'Kladn\xe1\xa0\u0394\xa0=\xa0sp\u0159\xedn\u011bn\xe9 du\u0161e hodnotow\xed v\xfd\u0161 ne\u017e komunita. '
-        f'Se\u0159azeno sestupn\u011b dle CF sk\xf3re. Na rozd\xedl od fin\xe1ln\xedch '
-        f'\u017eeb\u0159\xed\u010dk\u016f se tu shl\xe9dnut\xe9 tituly nefiltruj\xed, jen '
-        f'ozna\u010duj\xed \u0161t\xedtkem \u2014 potvrzuj\xed shodu vkusu.</p>'
+        f'{len(cf_recs)} titulů nalezených přes senpai na AniListu. '
+        f'CF skóre&nbsp;=&nbsp;průměr komunity&nbsp;+&nbsp;vážená odchylka senpai. '
+        f'Kladná&nbsp;Δ&nbsp;=&nbsp;senpai to hodnotí výš než komunita. '
+        f'Seřazeno sestupně dle CF skóre. Na rozdíl od finálních '
+        f'žebříčků se tu shlédnuté tituly nefiltrují, jen '
+        f'označují štítkem — potvrzují shodu vkusu.{cap_note}</p>'
     )
 
-    # \u2500\u2500 Tvoji senpai: u\u017eivatel\u00e9 s ov\u011b\u0159en\u011b podobn\u00fdm vkusem \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Tvoji senpai: uživatelé s ověřeně podobným vkusem ────────────────
     if senpai:
         parts.append('<h2>Tvoji senpai</h2>')
-        parts.append('<p class="note">Podobnost = Pearson na komunitn\u011b-relativn\u00edch '
-                     'odchylk\u00e1ch p\u0159es V\u0160ECHNY tituly, kter\u00e9 m\u00e1te ohodnocen\u00e9 oba '
-                     '(ne jen vzorek). Sk\u00f3re = podobnost smr\u0161t\u011bn\u00e1 velikost\u00ed p\u0159ekryvu '
-                     '(n/(n+K)) a sn\u00ed\u017een\u00e1 za nepokryt\u00e9 obl\u00edben\u00e9. \u201eObl\u00edben\u00e9" = pod\u00edl '
-                     'tv\u00fdch nejlep\u0161\u00edch zn\u00e1mek, kter\u00e9 senpai zn\u00e1 (ohodnotil, nebo m\u00e1 '
-                     'na PTW) \u2014 kdo v\u011bt\u0161inu tv\u00fdch favorit\u016f nezn\u00e1, je slab\u0161\u00ed pr\u016fvodce. '
-                     '\u201eNav\u00edc" = kolik jeho ohodnocen\u00fdch titul\u016f ty nem\u00e1\u0161 shl\u00e9dnut\u00fdch '
-                     '\u2014 z\u00e1sob\u00e1rna doporu\u010den\u00ed.</p>')
+        parts.append('<p class="note">Podobnost = Pearson na komunitně-relativních '
+                     'odchylkách přes VŠECHNY tituly, které máte ohodnocené oba '
+                     '(ne jen vzorek). Skóre = podobnost smrštěná velikostí překryvu '
+                     '(n/(n+K)) a snížená za nepokryté oblíbené. „Oblíbené" = podíl '
+                     'tvých nejlepších známek, které senpai zná (ohodnotil, nebo má '
+                     'na PTW) — kdo většinu tvých favoritů nezná, je slabší průvodce. '
+                     '„Navíc" = kolik jeho ohodnocených titulů ty nemáš shlédnutých '
+                     '— zásobárna doporučení.</p>')
         parts.append('<div class="panel"><table>'
-                     '<tr><th>senpai</th><th>sk\u00f3re</th><th>podobnost</th>'
-                     '<th>p\u0159ekryv</th><th>obl\u00edben\u00e9</th>'
-                     '<th>ohodnoceno</th><th>nav\u00edc</th></tr>')
+                     '<tr><th>senpai</th><th>skóre</th><th>podobnost</th>'
+                     '<th>překryv</th><th>oblíbené</th>'
+                     '<th>ohodnoceno</th><th>navíc</th></tr>')
         for s in senpai:
             profile = f'https://anilist.co/user/{_esc(s.name)}' if s.name else '#'
             fav_total = getattr(s, "fav_total", 0)
             fav = (f'{s.fav_coverage:.0%} <span style="color:{MUT}">'
-                   f'({s.fav_covered}/{fav_total})</span>') if fav_total else '\u2014'
+                   f'({s.fav_covered}/{fav_total})</span>') if fav_total else '—'
             parts.append(
                 f'<tr><td><a href="{profile}" target="_blank">{_esc(s.name or s.uid)}</a></td>'
                 f'<td class="mono pos">{s.score:.2f}</td>'
@@ -760,10 +792,10 @@ def render_cf_recommendations_html(
                 f'<td class="mono" style="color:{MUT}">{s.n_rated}</td>'
                 f'<td class="mono" style="color:{MUT}">{s.n_novel}</td></tr>')
         parts.append('</table></div>')
-        parts.append('<h2>Doporu\u010den\u00ed</h2>')
+        parts.append('<h2>Doporučení</h2>')
 
     watched = watched_ids or set()
-    for i, r_cf in enumerate(cf_recs, 1):
+    for i, r_cf in enumerate(shown, 1):
         mid = r_cf.get("mal_id")
         enr = (enr_data or {}).get(mid)
         parts.append(_cf_rec_card(r_cf, enr, i, watched=mid in watched))

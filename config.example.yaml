@@ -34,8 +34,11 @@ enrich:
   include_staff: false      # signál po režisérech/scenáristech (nové) — stojí
                             # navíc 1 Jikan volání na titul (/staff endpoint)
   use_shikimori: false      # další nezávislý zdroj "podobných anime" kandidátů
-                            # (viz sources/shikimori.py) — naživo neověřeno,
-                            # zkontroluj tvar odpovědi před ostrým zapnutím
+                            # (viz sources/shikimori.py). Tvar odpovědi ověřen
+                            # (prostý seznam bez skóre podobnosti → váží se
+                            # pozicí). Default vypnuto kvůli ceně: +1 request
+                            # na seed; přínos jsou hlavně NOVÍ kandidáti,
+                            # pořadí ovlivní jen okrajově
 
 recommend:
   high_score: 8.0           # od jaké známky brát titul jako seed
@@ -63,6 +66,10 @@ recommend:
   user_cf_senpai_count: 20        # kolik senpai vybrat
   user_cf_min_full_overlap: 40    # min. společně ohodnocených titulů (plný překryv)
   user_cf_shrink_k: 50.0          # smrštění podobnosti n/(n+K)
+  user_cf_report_top: 200         # strop karet v cf_recommendations.html
+                                  # (0 = bez stropu). Senpai dohromady ohodnotí
+                                  # tisíce titulů; bez stropu z toho bylo HTML
+                                  # v řádu MB. Vstup je seřazený, ořez bere špičku
   user_cf_fav_score: 9.0          # od jaké mé známky je titul „oblíbený"
   user_cf_fav_miss_penalty: 0.3   # srážka skóre senpaie, který mé oblíbené nezná
                                   # (ani z PTW); 0.3 = -30 % při nulovém pokrytí,

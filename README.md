@@ -91,7 +91,13 @@ animodel proto **necílí na známku, ale na odchylku**:
    navíc **afinitu** — vážený průměr reziduí svých členů (o kolik ji hodnotíš
    nad baseline) — kterou doporučení používají místo surové známky.
 6. **Kalibrace.** Globální škála efektů a interval predikce z 5-násobné
-   cross-validace.
+   cross-validace. Trojice (jsou-li zapnuté) mají **vlastní škálu** — jsou jiný
+   řád důkazů než singly a páry (řidší podpora, kandidáti z klastrových
+   signatur), tak se i kalibrují zvlášť: společný grid přes `(s, s₃)`.
+   Fold-modely si přitom klastrují a hledají trojice **samy** na svých 4/5 dat,
+   aby do cross-validace neprosákla znalost testovací části. Report i CLI
+   hlásí, o kolik trojice CV RMSE zlepšily (`bez trojic by CV RMSE bylo …`) —
+   ať je vidět, jestli se ten experiment vyplácí.
 
 ### Atributy se neudržují ručně
 
@@ -143,9 +149,10 @@ Dvě nezávislé větve, sjednocené a deduplikované:
 
 - **Atributová / obsahová** — z tvých oblíbených seedů se tahá MAL + AniList
   „recommendations" graf (item-based CF), volitelně i Shikimori `/similar`
-  (`enrich.use_shikimori` v configu, default vypnuto — naživo neověřený tvar
-  odpovědi), a navíc discovery přes AniList tag-search na tvé
-  nejcharakterističtější tagy.
+  (`enrich.use_shikimori` v configu, default vypnuto — stojí +1 request na seed
+  a přináší hlavně *nové kandidáty*, pořadí ovlivní jen okrajově: endpoint
+  vrací prostý seznam bez skóre podobnosti, takže se váží pozicí), a navíc
+  discovery přes AniList tag-search na tvé nejcharakterističtější tagy.
 - **Collaborative / uživatelská** (volitelná, `--user-cf`) — hledání „senpai":
   pár (default 20) uživatelů s **ověřeně** podobným vkusem, kteří viděli víc než
   ty. Discovery jde přes tvé nejméně populární tituly (sdílení nišového titulu
@@ -216,7 +223,7 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `model.n_clusters` | `null` = auto; nebo napevno počet nálad |
 | `model.intensity_lexicon` | cesta k intensity.yaml (osa náročnosti, viz `--gen-intensity`) |
 | `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
-| `model.interaction_triples` | experiment: synergie trojic nad jádry nálad |
+| `model.interaction_triples` | experiment: synergie trojic nad jádry nálad (vlastní kalibrovaná škála; CLI hlásí, kolik reálně přinesly) |
 | `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
 | `recommend.w_taste_fit / w_cf / w_user_cf / w_quality` | váhy 4 složek řazení doporučení |
 | `recommend.min_mal_rec_votes / min_anilist_rec_rating` | prahy síly hrany v grafu podobnosti |
@@ -225,7 +232,8 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |
 | `enrich.use_jikan` | vypni pro nouzový AniList-only režim (viz `--no-jikan`) |
 | `enrich.include_staff` | signál po režisérech/scenáristech (+1 Jikan volání/titul, default vypnuto) |
-| `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (naživo neověřeno, default vypnuto) |
+| `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (default vypnuto, +1 request/seed) |
+| `recommend.user_cf_report_top` | strop karet v `cf_recommendations.html` (0 = bez stropu) |
 | `recommend.use_user_cf` + `user_cf_*` | senpai pipeline (viz `--user-cf`): počet senpai, velikost poolu, min. plný překryv… |
 
 Plný seznam parametrů (včetně výchozích hodnot) je v `config.example.yaml`.
@@ -244,6 +252,7 @@ animodel/
     jikan.py        MAL data + recommendations + search (Jikan-kompat. API: Tenrai/Jikan)
     anilist.py      AniList tagy + recommendations + tag-search + user-based CF
     shikimori.py    volitelný zdroj "podobných anime" (/similar), default vypnuto
+                    (tvar odpovědi ověřen: prostý seznam, váží se pozicí)
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
   intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
   usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
@@ -314,3 +323,22 @@ ne hostu). AniList je druhý, nezávislý zdroj (tagy, rec graf, user-CF).
 Všechna API mají rate-limity; respektuj je (klient cachuje). Komunitní skóre se
 bere primárně z MAL, fallback AniList — záměrně se **neprůměrují** (jsou silně
 korelované, průměrování nepřináší informaci a riskuje zkreslení).
+
+### Úklid cache
+
+Cache nemá expiraci (záměr — maž ručně, když chceš čerstvá data; 1 request =
+1 soubor, takže jde smazat i jen část). **Pozor na verzované klíče:** když se
+změní schéma odpovědi, klient přejde na nový suffix (`mal_{id}_v2`,
+`userlist_{uid}_v2`) a **staré soubory zůstanou ležet** — nikdy se už nečtou,
+ale zabírají místo. Po přechodu na `_v2` u user-CF seznamů to bylo přes 100 MB
+mrtvých dat. Osiřelé verze poznáš podle chybějícího suffixu — maž je ale
+**vylučovací** podmínkou, ne shell wildcardem:
+
+```bash
+# správně: vše krom _v2
+find cache/cf_al -name 'userlist_*.json' ! -name '*_v2.json' -print   # kontrola
+find cache/cf_al -name 'userlist_*.json' ! -name '*_v2.json' -delete
+```
+
+> `rm cache/cf_al/userlist_*[0-9].json` **nepoužívej** — `v2` končí číslicí,
+> takže by ten vzor smazal i aktivní `_v2` soubory.

@@ -24,7 +24,7 @@ class _StubModel:
     def top_effects(self, n=40, sign=1):
         return []
 
-    def _raw_resid_pred(self, attrs):
+    def affinity(self, attrs):
         return 0.0
 
     def predict(self, attrs, community):

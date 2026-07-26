@@ -162,10 +162,21 @@ class TasteModel:
         self.interactions: list[Interaction] = []
         self.triples: list[Triple] = []
         self.scale: float = 1.0           # globální faktor s z cross-validace
+                                          # (singl efekty + párové interakce)
+        self.scale_triples: float = 0.0   # VLASTNÍ faktor pro trojice, taky z CV.
+                                          # Trojice jsou jiný řád důkazů než
+                                          # singly/páry (řídší podpora, kandidáti
+                                          # z klastrových signatur), takže sdílet
+                                          # s nimi jedno `s` není o co opřít --
+                                          # viz _calibrate_scale.
         self.cv_rmse: float = 0.0
         self.cv_mae: float = 0.0
+        self.cv_rmse_no_triples: float = 0.0  # nejlepší CV RMSE při vypnutých
+                                          # trojicích -- kolik reálně přinesly
         self.resid_std: float = 1.0       # pro intervaly predikce
         self.clusters: list[Cluster] = []
+        self._n_clusters: int | None = None   # předává se fold-modelům, ať
+                                              # klastrují stejným postupem
 
     # ── Fit ──────────────────────────────────────────────────────────────────
 
@@ -173,12 +184,12 @@ class TasteModel:
         self.titles = [t for t in titles if t.user_score > 0]
         if len(self.titles) < 20:
             raise ValueError(f"Příliš málo ohodnocených titulů ({len(self.titles)}).")
+        self._n_clusters = n_clusters
         self._fit_baseline(self.titles)
         # cílová proměnná = odchylka od MÉ očekávané známky (po zohlednění komunity)
         self._resid = {t.mal_id: self._target(t) for t in self.titles}
         self._fit_effects()
         self._fit_interactions()
-        self._calibrate_scale()
         # n_clusters se předává rovnou sem -- dřív se klastrovalo jednou tady
         # (vždy s k=None/auto, config se ignoroval) a pak ZNOVU explicitně
         # v cli.py s cfg.model.n_clusters, což zdvojovalo celý KMeans+silhouette
@@ -186,12 +197,15 @@ class TasteModel:
         # výsledek prvního, ne ho doplňovalo).
         self._fit_clusters(n_clusters)
         # Trojice až PO klastrech -- kandidáty generují klastrové signatury.
-        # Do kalibrace scale (výš) nevstupují: CV fold-modely klastrování
-        # nedělají (drahé a nestabilní na 4/5 dat), takže by je stejně
-        # neuměly zrcadlit -- `s` se na ně aplikuje až při predikci.
         self.triples = []
         if self.use_triples:
             self._fit_triples()
+        # Kalibrace až ÚPLNĚ NAKONEC, nad modelem v té podobě, v jaké bude
+        # doopravdy predikovat. Dřív běžela PŘED klastrováním a trojicemi,
+        # takže se `s` hledalo na modelu bez trojic a pak se aplikovalo na
+        # predikci s nimi -- `s` bylo nadhodnocené a cv_rmse popisovala jiný
+        # model, než který generoval doporučení (HODNOCENI_PROJEKTU.md §5.1).
+        self._calibrate_scale()
         return self
 
     # ── Baseline: můj průměr + sklon vůči komunitě ───────────────────────────
@@ -360,84 +374,152 @@ class TasteModel:
                 ))
         self.triples.sort(key=lambda x: -abs(x.lift))
 
-    def _raw_resid_pred(self, attrs: dict[str, AttrValue]) -> float:
-        """Predikce rezidua PŘED globálním faktorem s (čistě aditivní část)."""
-        total = 0.0
+    def _resid_parts(self, attrs: dict[str, AttrValue]) -> tuple[float, float]:
+        """
+        Reziduální predikce rozložená na DVĚ nezávisle škálované složky:
+        `(singly + páry, trojice)`, obojí PŘED globálními faktory.
+
+        Rozdělení existuje proto, že každá složka má vlastní kalibrovaný
+        faktor (`scale`, `scale_triples`) -- viz _calibrate_scale.
+        """
+        base = 0.0
         for key, av in attrs.items():
             e = self.effects.get(key)
             if e:
-                total += e.effect * av.weight
+                base += e.effect * av.weight
         # interakce -- škálované vahami atributů KANDIDÁTA (analogie
         # `e.effect * av.weight` u singl efektů; slabě přítomný tag
         # neaktivuje synergii naplno)
         present = set(attrs)
         for it in self.interactions:
             if it.a in present and it.b in present:
-                total += it.lift * attrs[it.a].weight * attrs[it.b].weight
+                base += it.lift * attrs[it.a].weight * attrs[it.b].weight
+        tri = 0.0
         for tr in self.triples:
             a, b, c = tr.keys
             if a in present and b in present and c in present:
-                total += (tr.lift * attrs[a].weight
-                          * attrs[b].weight * attrs[c].weight)
-        return total
+                tri += (tr.lift * attrs[a].weight
+                        * attrs[b].weight * attrs[c].weight)
+        return base, tri
+
+    def _raw_resid_pred(self, attrs: dict[str, AttrValue]) -> float:
+        """Součet obou složek BEZ škálování (diagnostika). Pro predikci a
+        řazení použij `affinity()` -- ta respektuje kalibrované faktory."""
+        base, tri = self._resid_parts(attrs)
+        return base + tri
+
+    def affinity(self, attrs: dict[str, AttrValue]) -> float:
+        """
+        Kalibrovaná predikce afinity: `scale·(singly+páry) + scale_triples·trojice`.
+
+        Veřejné API pro řazení (recommend.py, season.py) -- ty dřív sahaly
+        na `_raw_resid_pred`, tedy na NEškálovaný součet. To bylo neškodné,
+        dokud existoval jediný faktor (z-skóre společnou konstantu stejně
+        vykrátí), ale se dvěma faktory na tom záleží: poměr scale_triples/scale
+        je právě ta informace, kterou CV o trojicích zjistila.
+        """
+        base, tri = self._resid_parts(attrs)
+        return self.scale * base + self.scale_triples * tri
+
+    #: grid kandidátů pro `scale` i `scale_triples` (0.00, 0.05, …, 1.00)
+    _SCALE_GRID = tuple(i / 20 for i in range(0, 21))
 
     def _calibrate_scale(self):
         """
-        Najde globální faktor s ∈ [0,1] minimalizující CV RMSE; uloží i intervaly.
+        Najde faktory minimalizující CV RMSE; uloží i intervaly predikce.
 
-        Fold-modely se fitují jen JEDNOU (viz _cv_predictions) -- fit na `s`
-        vůbec nezávisí, `s` vstupuje až do predikce. Dřívější verze volala
-        celou cross-validaci (včetně přefitování všech foldů) pro každou z
-        21 hodnot gridu + 2 dodatečná vyhodnocení = 115 fold-fitů místo 5
-        (HODNOCENI_PROJEKTU.md §5.2); výsledky jsou numericky identické,
-        jen se neplýtvá.
+        Bez trojic: 1D grid přes `s` (přesně dřívější chování).
+
+        S trojicemi (`interaction_triples`): SPOLEČNÝ 2D grid přes
+        `(s, s_triples)`. Trojice nedostávají tentýž faktor jako singly a
+        páry, protože jsou to jiný řád důkazů -- řidší podpora a kandidáti
+        vybíraní z klastrových signatur, ne z plné enumerace. Kolik jim
+        věřit, je proto samostatná otázka a CV na ni umí odpovědět.
+        Vyhodnocení jednoho bodu gridu je čistá aritmetika nad
+        předpočítanými CV řádky (_eval_scale), takže 441 kombinací stojí
+        zlomek sekundy -- fitovat se nic znovu nemusí.
+
+        Při shodě RMSE vyhrává NIŽŠÍ faktor (grid je vzestupný a porovnává
+        se ostrým `<`) -- konzervativnější varianta, konzistentní se
+        smrštěním jinde v modelu.
+
+        `cv_rmse_no_triples` = nejlepší RMSE dosažitelná s `s_triples = 0`;
+        rozdíl proti `cv_rmse` je poctivá odpověď na „přinesly trojice
+        vůbec něco?".
         """
         rows = self._cv_predictions()
-        best_s, best_rmse, best_mae = 0.0, float("inf"), 0.0
-        for s in [i / 20 for i in range(0, 21)]:
-            rmse, mae = self._eval_scale(rows, s)
-            if rmse < best_rmse:
-                best_rmse, best_s, best_mae = rmse, s, mae
-        self.scale = best_s
+        grid = self._SCALE_GRID
+
+        best_rmse, best_mae, best_s, best_st = float("inf"), 0.0, 0.0, 0.0
+        for s in grid:
+            for st in (grid if self.use_triples else (0.0,)):
+                rmse, mae = self._eval_scale(rows, s, st)
+                if rmse < best_rmse:
+                    best_rmse, best_mae, best_s, best_st = rmse, mae, s, st
+        self.scale, self.scale_triples = best_s, best_st
+        if not self.triples:
+            # Fold-modely můžou mít trojice i když PLNÝ model žádnou neudrží
+            # (jiná data → jiné lifty projdou prahem), takže grid umí vrátit
+            # nenulové s_triples, které tady není co škálovat. Vynuluj, ať
+            # atribut neříká něco, co na predikci nemá vliv.
+            self.scale_triples = 0.0
         self.cv_rmse, self.cv_mae = best_rmse, best_mae
-        self.baseline_rmse, _ = self._eval_scale(rows, 0.0)   # jen ū + beta·komunita
+
+        self.cv_rmse_no_triples = min(
+            self._eval_scale(rows, s, 0.0)[0] for s in grid)
+        self.baseline_rmse, _ = self._eval_scale(rows, 0.0, 0.0)  # jen ū + beta·komunita
         self.resid_std = self.cv_rmse
 
-    def _cv_predictions(self, folds: int = 5, seed: int = 42) -> list[tuple[float, float, float]]:
+    def _cv_predictions(self, folds: int = 5, seed: int = 42) -> list[tuple]:
         """
         Jednou přefituje fold-modely a pro každý out-of-fold titul vrátí
-        trojici (baseline_predikce, surové_reziduum, skutečné_skóre).
-        Vyhodnocení libovolného `s` je pak čistá aritmetika nad těmito
-        trojicemi (_eval_scale) -- žádné další fitování.
+        čtveřici (baseline_predikce, singly+páry, trojice, skutečné_skóre).
+        Vyhodnocení libovolného `(s, s_triples)` je pak čistá aritmetika nad
+        těmito čtveřicemi (_eval_scale) -- žádné další fitování.
+
+        S `interaction_triples` fold-model klastruje a fituje trojice SÁM,
+        na svých 4/5 dat. Je to dražší (~0,3 s na fold; sklearn už je v tu
+        chvíli naimportovaný z hlavního modelu, takže žádná studená cena),
+        ale je to jediná varianta bez úniku informace: kandidáti trojic
+        vznikají z klastrových signatur, takže převzít je hotové z plného
+        modelu by do každého foldu protáhlo znalost jeho testovací pětiny --
+        a přesně tomu se kalibrace vyhýbá.
         """
         rng = random.Random(seed)
         idx = list(range(len(self.titles)))
         rng.shuffle(idx)
         fold_of = {i: k % folds for k, i in enumerate(idx)}
-        rows: list[tuple[float, float, float]] = []
+        rows: list[tuple] = []
         for f in range(folds):
             train = [self.titles[i] for i in idx if fold_of[i] != f]
             test = [self.titles[i] for i in idx if fold_of[i] == f]
             sub = TasteModel(self.K, self.min_attr_count,
-                             self.int_min_count, self.int_min_lift)
+                             self.int_min_count, self.int_min_lift,
+                             interaction_triples=self.use_triples,
+                             intensity=self.intensity)
             sub.titles = train
             sub._fit_baseline(train)
             sub._resid = {t.mal_id: sub._target(t) for t in train}
             sub._fit_effects()
             sub._fit_interactions()
+            if self.use_triples:
+                sub._fit_clusters(self._n_clusters)
+                sub._fit_triples()
             for t in test:
-                rows.append((sub._baseline_pred(t.community),
-                             sub._raw_resid_pred(t.attrs),
+                base, tri = sub._resid_parts(t.attrs)
+                rows.append((sub._baseline_pred(t.community), base, tri,
                              t.user_score))
         return rows
 
     @staticmethod
-    def _eval_scale(rows: list[tuple[float, float, float]], s: float) -> tuple[float, float]:
-        """(RMSE, MAE) pro dané `s` nad předpočítanými CV predikcemi --
-        stejný výpočet (včetně ořezu na 1–10) jako dřívější _cross_val."""
+    def _eval_scale(rows: list[tuple], s: float,
+                    s_triples: float = 0.0) -> tuple[float, float]:
+        """(RMSE, MAE) pro dané `(s, s_triples)` nad předpočítanými CV
+        predikcemi -- včetně ořezu predikce na 1–10, jako při skutečné
+        predikci."""
         sq = ab = 0.0
-        for base, raw, y in rows:
-            pred = max(1.0, min(10.0, base + s * raw))
+        for base, raw, tri, y in rows:
+            pred = max(1.0, min(10.0, base + s * raw + s_triples * tri))
             err = pred - y
             sq += err * err
             ab += abs(err)
@@ -457,8 +539,7 @@ class TasteModel:
         ho umí přepínačem skrýt.
         """
         base = self._baseline_pred(community)
-        raw = self._raw_resid_pred(attrs)
-        pred = base + self.scale * raw
+        pred = base + self.affinity(attrs)
         pred = max(1.0, min(10.0, pred))
         lo = max(1.0, pred - self.resid_std)
         hi = min(10.0, pred + self.resid_std)
@@ -480,8 +561,11 @@ class TasteModel:
             a, b, c = tr.keys
             if a in present and b in present and c in present:
                 w_tri = attrs[a].weight * attrs[b].weight * attrs[c].weight
+                # vlastní faktor -- příspěvek ve vysvětlení musí odpovídat
+                # tomu, co skutečně vstoupilo do `pred` výš
                 contribs.append((tr.label, "interakce",
-                                 self.scale * tr.lift * w_tri, tr.spoiler))
+                                 self.scale_triples * tr.lift * w_tri,
+                                 tr.spoiler))
         contribs.sort(key=lambda x: -abs(x[2]))
         return pred, lo, hi, contribs
 

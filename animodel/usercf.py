@@ -14,6 +14,8 @@ brát od nich. Ne statisticky průměrovat stovky slabě ověřených anonymů.
   2. PLNÉ SEZNAMY: pro kandidáty v pořadí priority stáhnout kompletní
      seznamy (cache `userlist_{uid}`; privátní/smazané účty jsou trvale
      zacachované jako prázdné a přeskakují se bez ztráty místa v poolu).
+     V paměti se seznam nedrží -- k výběru stačí spočítané metriky a
+     vybraným se doplní z cache až ve fázi 4 (viz `hydrate_entries`).
   3. SENPAI SKÓRE na plném překryvu: Pearson na komunitně-relativních
      odchylkách přes VŠECHNY tituly, které máme ohodnocené oba, smrštěný
      `n/(n+K)` — málo překryvu = málo důvěry. Stejná filozofie jako zbytek
@@ -221,12 +223,22 @@ def evaluate_candidates(client, candidates: list[tuple[int, str, float, int]],
                         candidate_pool: int, shrink_k: float,
                         favorites: set[int] | None = None,
                         fav_miss_penalty: float = 0.0,
-                        scan_budget_factor: float = 3.0) -> list[Senpai]:
+                        scan_budget_factor: float = 3.0,
+                        keep_entries: bool = False) -> list[Senpai]:
     """
     Projde kandidáty v pořadí priority a vyhodnotí `candidate_pool`
     POUŽITELNÝCH plných seznamů (privátní/smazané/dočasně selhané se
     přeskočí bez ztráty místa; scan budget je pojistka proti extrémnímu
     podílu nepoužitelných).
+
+    `keep_entries=False` (default) po vyhodnocení ZAHODÍ `Senpai.entries` --
+    metriky pro select_senpai() jsou v tu chvíli spočítané a plné seznamy
+    potřebuje až recommend_from_senpai(), a to jen pro pár VYBRANÝCH.
+    Držet je pro celý pool je čirá ztráta: na reálných datech má seznam
+    medián ~1000 položek (~230 kB), takže candidate_pool=2000 znamenal
+    ~450 MB zbytečně držené paměti (HODNOCENI_PROJEKTU.md §5.2). Vybraným
+    senpai je zpátky doplní `hydrate_entries()` z cache (zdarma -- ve
+    stejném běhu se právě stáhly na disk).
     """
     evaluated: list[Senpai] = []
     max_attempts = min(len(candidates),
@@ -241,9 +253,12 @@ def evaluate_candidates(client, candidates: list[tuple[int, str, float, int]],
         userlist = client.get_user_animelist(uid)
         if userlist is None:
             continue   # privátní/smazaný (trvale) nebo dočasné selhání
-        evaluated.append(evaluate_candidate(
+        senpai = evaluate_candidate(
             uid, name, userlist, my_scores, watched_ids, shrink_k,
-            favorites=favorites, fav_miss_penalty=fav_miss_penalty))
+            favorites=favorites, fav_miss_penalty=fav_miss_penalty)
+        if not keep_entries:
+            senpai.entries = []   # viz docstring; doplní hydrate_entries()
+        evaluated.append(senpai)
     progress_done(f"  user-CF: vyhodnoceno {len(evaluated)} plných seznamů "
                   f"({tried} kandidátů zkuseno)")
     if evaluated and len(evaluated) < candidate_pool and tried >= max_attempts:
@@ -252,6 +267,24 @@ def evaluate_candidates(client, candidates: list[tuple[int, str, float, int]],
             f"{len(evaluated)}/{candidate_pool} použitelnými seznamy"
         )
     return evaluated
+
+
+def hydrate_entries(client, senpai: list[Senpai]) -> list[Senpai]:
+    """
+    Doplní `entries` VYBRANÝM senpai zpět z cache (protipól k
+    `evaluate_candidates(keep_entries=False)`).
+
+    Čtení je zdarma: každý vyhodnocený kandidát má svůj seznam na disku ze
+    stejného běhu (kdyby ho neměl, `evaluate_candidates` by ho přeskočil a
+    senpaiem by se nestal). Mutuje objekty na místě a vrací je pro pohodlí
+    volajícího.
+    """
+    for s in senpai:
+        if s.entries:
+            continue
+        userlist = client.get_user_animelist(s.uid)
+        s.entries = (userlist or {}).get("entries") or []
+    return senpai
 
 
 def select_senpai(evaluated: list[Senpai], *, senpai_count: int,
@@ -368,5 +401,8 @@ def find_senpai_recommendations(client, user_scores: dict[int, float],
     status(f"  user-CF: vybráno {len(senpai)} senpai "
            f"(skóre {senpai[0].score:.2f}–{senpai[-1].score:.2f}, "
            f"překryv {min(s.overlap for s in senpai)}–{max(s.overlap for s in senpai)})")
+    # Plné seznamy se drží jen pro vybrané senpai, ne pro celý pool -- viz
+    # evaluate_candidates(keep_entries=False) a hydrate_entries().
+    hydrate_entries(client, senpai)
     recs = recommend_from_senpai(senpai, rated_ids=set(user_scores))
     return senpai, recs

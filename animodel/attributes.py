@@ -60,8 +60,9 @@ CATEGORY_PRIORITY = [
     "theme", "tag", "studio", "director", "writer",
 ]
 
-# Sdíleno s jikan.py::list_all_staff (dřív duplikováno na dvou místech --
-# canonicalizace pozic patří sem, k ostatní logice atributů, ne do API klienta).
+# Kanonizace staff pozic patří sem, k ostatní logice atributů, ne do API
+# klienta (dřív to bylo duplikované i v jikan.py::list_all_staff -- ta
+# frekvenční pomůcka se nikdy nikde nevolala a byla 2026-07-25 smazána).
 DIRECTOR_POSITIONS = {"director", "series director"}
 WRITER_POSITIONS = {"script", "series composition", "screenplay",
                     "original creator", "original story"}

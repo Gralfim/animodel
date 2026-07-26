@@ -150,6 +150,34 @@ def test_rate_limited_gets_full_budget_of_len_plus_one():
     assert rl.throttled == len(retry_delays) + 1
 
 
+def test_rate_limited_does_not_sleep_after_final_attempt():
+    """Po POSLEDNÍM 429 se nespí -- driver hned vrací failure, takže čekání
+    nemá co změnit. Dřív se tu spalo retry_delays[-1] navíc (90 s u AniListu,
+    30 s u MAL API) na každý request s vyčerpaným rate limitem
+    (HODNOCENI_PROJEKTU.md §5.3)."""
+    retry_delays = [5, 15, 40, 90]
+    steps = [attempt_rate_limited(wait=0)] * (len(retry_delays) + 1)
+    result, n, rl, sleeps = make_driver(steps, retry_delays=retry_delays)
+    assert result.ok is False
+    assert result.permanent is False
+    # rozpočet pokusů se NEMĚNÍ -- ubyl jen poslední (marný) sleep
+    assert n == len(retry_delays) + 1
+    assert rl.throttled == len(retry_delays) + 1
+    assert sleeps == retry_delays          # ne [5, 15, 40, 90, 90]
+    assert sum(sleeps) == 150              # ne 240
+
+
+def test_rate_limited_with_empty_retry_delays_does_not_crash():
+    """Prázdný `retry_delays` = jediný pokus a žádné čekání. Dřív tahle
+    kombinace sáhla na retry_delays[-1] a spadla na IndexError."""
+    result, n, rl, sleeps = make_driver([attempt_rate_limited(wait=0)],
+                                        retry_delays=[])
+    assert result.ok is False
+    assert result.permanent is False
+    assert n == 1
+    assert sleeps == []
+
+
 def test_rate_limited_then_retryable_respects_shorter_retryable_cutoff():
     """Po 429 na prvním pokusu se retryable chyba na druhém pokusu už
     vzdává (index pokusu se počítá globálně, retryable rozpočet je
