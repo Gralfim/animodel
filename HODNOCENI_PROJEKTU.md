@@ -760,6 +760,49 @@ kosinus by degenerovaný titul opravdu vybral** (aby test nemohl zvacuovat) a
 teprve pak, že implementace na něj nesedne. První verze toho testu vacuous byla
 — čistý kosinus na ní vybíral správně, takže filtr netestovala vůbec.
 
+**9.2c Doplnění osy náročnosti + strukturální mezera v universu**
+(2026-07-26) — ✅ HOTOVO. Diagnostika `unrated_intensity_attrs()` po ostrém
+běhu nahlásila 10 pozorovaných atributů bez hodnoty; při jejich revizi vyšel
+najevo i **skutečný bug**:
+
+> `build_universe()` stahovalo z MAL jen `filter=genres` (18 položek) a
+> `filter=themes` (52). MAL má ale **třetí skupinu `explicit_genres`**
+> (Ecchi, Erotica, Hentai), která se nestahovala nikdy. `build_attributes()`
+> přitom MAL žánry nefiltruje — vylučují se jen AniList `isAdult` **tagy**,
+> což je jiná, mnohem granulárnější množina. **Erotica** se proto v datech
+> pozorovala, ale do `intensity.yaml` se nemohla dostat ani regenerací a
+> hlásila se jako neohodnocená pořád dokola. `Ecchi` tu mezeru náhodou
+> obcházelo přes AniList `GenreCollection`; Erotica tam ekvivalent nemá.
+> Opraveno + test `test_build_universe_includes_mal_explicit_genres`.
+
+Přiřazené hodnoty (kalibrované proti sousedním klíčům v lexikonu, ne od stolu;
+zapsané do `CURATED` i do uživatelova `intensity.yaml`):
+
+| atribut | hodnota | proč |
+|---|---|---|
+| `adult_cast` (20×) | **+0.1** | jako seinen/josei — dospělejší rámování, ale i spousta lehkých komedií |
+| `video_game` (5×) | **−0.1** | hra jako prostředí/námět; ne `high_stakes_game` (+0.5) |
+| `love_status_quo` (4×) | **−0.2** | vztah se záměrně neposouvá = pohodlí (opak `love_triangle` +0.1) |
+| `performing_arts` (2×) | **+0.1** | divadlo/rakugo — dramatičtější než `music` (−0.2) |
+| `visual_arts` (2×) | **−0.1** | tvůrčí slice-of-life |
+| `magical_sex_shift` (2×) | **−0.3** | komediální premisa, blízko `parody` |
+| `erotica` (2×) | **−0.2** | méně komediální než `ecchi` (−0.3) |
+
+**Vědomě ponecháno na 0.0** (revidováno, ne zapomenuto — explicitní nula se
+v diagnostice už nehlásí):
+
+- `award_winning` (14×) — je to marker **uznání/kvality**, ne emocionální
+  náročnosti. Kladná hodnota by na osu náročnosti propašovala komunitní
+  kvalitu, kterou si model všude jinde pečlivě odděluje.
+- `workplace` (4×) — genuinely bimodální (Shirobako vs. vyhoření), nenulová
+  hodnota by přidala šum.
+- `girls_love` / `boys_love` (1× / 1×) — spektrum od lehkého romcomu po
+  těžké drama; spolehlivé znaménko neexistuje.
+
+Dopad je malý a je to tak správně: intenzity nálad se posunuly nejvýš
+o **0,012** (nízkofrekvenční atributy s mírnými hodnotami). Jde o úplnost
+a o to, že diagnostika je teď čistá (1 → 0 neohodnocených).
+
 **9.5 Diagnostika kanonizace atributů (§6).** `--analyze-attrs`: vypsat klíče,
 které se liší jen málo (Levenshtein ≤2, nebo shodné po odstranění stop-slov) a
 **nejsou** v `ALIAS`. Jediný tichý selhací mód `attributes.py` je „dva klíče pro

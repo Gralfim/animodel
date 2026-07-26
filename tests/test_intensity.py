@@ -62,6 +62,8 @@ class FakeJikan:
             return [{"mal_id": 4, "name": "Comedy"}, {"mal_id": 8, "name": "Drama"}]
         if filter == "themes":
             return [{"mal_id": 40, "name": "Psychological"}]
+        if filter == "explicit_genres":
+            return [{"mal_id": 49, "name": "Erotica"}, {"mal_id": 9, "name": "Ecchi"}]
         return []
 
 
@@ -70,12 +72,35 @@ def test_build_universe_merges_sources_and_skips_adult_only():
     keys = {e["key"] for e in universe}
     assert keys == {"comedy", "drama", "psychological", "science_fiction",
                     "tearjerker", "coming_of_age", "josei_fantasy", "kuudere",
-                    "plot_twist"}
+                    "plot_twist", "erotica", "ecchi"}
     # isAdult (Nudity) vynechán -- build_attributes() adult tagy zahazuje,
     # v lexikonu by nikdy nic netrefil. Spoiler tag (Plot Twist) je naopak
     # ZAHRNUTÝ -- od 2026-07 vstupují spoiler tagy do modelu s příznakem.
     # "Drama" z GenreCollection se dedupovalo s MAL žánrem (jeden klíč),
     # "Sci-Fi" prošlo aliasem na science_fiction.
+
+
+def test_build_universe_includes_mal_explicit_genres():
+    """MAL má `explicit_genres` jako TŘETÍ skupinu, kterou `filter=genres`
+    nevrací. build_attributes() přitom MAL žánry nefiltruje (vylučují se jen
+    AniList isAdult TAGY), takže bez tohohle dotazu se "Erotica" pozorovala
+    v datech, ale do lexikonu se nedostala nikdy -- hlásila se jako
+    neohodnocená po každé regeneraci. Ecchi tu mezeru náhodou obcházelo přes
+    AniList GenreCollection; Erotica tam ekvivalent nemá."""
+    universe = build_universe(jikan=FakeJikan(), anilist=None)
+    keys = {e["key"] for e in universe}
+    assert "erotica" in keys
+    assert {"comedy", "drama", "psychological"} <= keys
+
+
+def test_curated_covers_keys_diagnostics_flagged_on_live_data():
+    """Klíče, které unrated_intensity_attrs() nahlásila na živých datech
+    (2026-07-26), musí mít kurátorovanou hodnotu -- jinak by je regenerace
+    zapsala znovu jako nuly."""
+    for key in ("adult_cast", "video_game", "performing_arts", "visual_arts",
+                "magical_sex_shift", "erotica", "love_status_quo"):
+        assert CURATED.get(key), f"{key} nemá kurátorovanou hodnotu"
+        assert -1.0 <= CURATED[key] <= 1.0
 
 
 def test_build_universe_anilist_only_still_has_genres():
@@ -102,8 +127,10 @@ def test_generate_prefills_curated_then_prior_then_zero(tmp_path):
     assert lex["comedy"] == CURATED["comedy"]
     assert lex["josei_fantasy"] == category_prior("Theme-Comedy")  # prior
     assert lex["kuudere"] == 0.0                            # nic -> neutrální
-    assert stats["total"] == 9
-    assert stats["from_curated"] >= 4    # comedy, drama, psychological, tearjerker, coming_of_age
+    # 9 z genres/themes/AniList + 2 z explicit_genres (erotica, ecchi)
+    assert stats["total"] == 11
+    # comedy, drama, psychological, tearjerker, coming_of_age, ecchi, erotica
+    assert stats["from_curated"] == 7
     assert stats["from_prior"] == 2      # josei_fantasy + plot_twist (spoiler tag, Theme-Drama)
     assert stats["zero"] == 2            # kuudere + science_fiction
 

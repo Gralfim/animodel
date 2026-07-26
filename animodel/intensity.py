@@ -106,6 +106,18 @@ CURATED: dict[str, float] = {
     "team_sports": -0.2,
     "time_travel": 0.1,
     "music": -0.2,
+    # Doplněno 2026-07-26 po diagnostice unrated_intensity_attrs na živých
+    # datech. Kalibrováno proti sousedním klíčům výš, ne od stolu:
+    "adult_cast": 0.1,          # jako seinen/josei -- dospělejší rámování,
+                                # ale spousta lehkých komedií s dospělými
+    "video_game": -0.1,         # hra jako PROSTŘEDÍ/námět; neplest si
+                                # s high_stakes_game (+0.5) ani strategy_game
+    "performing_arts": 0.1,     # divadlo/tanec/rakugo -- dramatičtější než music
+    "visual_arts": -0.1,        # malba/tvorba mangy: tvůrčí slice-of-life
+    "magical_sex_shift": -0.3,  # komediální premisa (blízko parody)
+    "erotica": -0.2,            # MAL explicit žánr; méně komediální než ecchi
+    "love_status_quo": -0.2,    # vztah se záměrně NEposouvá = pohodlí
+                                # (opak love_triangle, které je +0.1)
 
     # ── AniList tagy: těžká strana ──
     "tragedy": 0.9,
@@ -239,6 +251,16 @@ def build_universe(jikan=None, anilist=None) -> list[dict]:
         for t in jikan.get_genres("themes"):
             if t.get("name"):
                 add(t["name"], "MAL: témata")
+        # MAL má TŘETÍ skupinu (Ecchi, Erotica, Hentai), kterou `filter=genres`
+        # nevrací. build_attributes() přitom MAL žánry nefiltruje -- vylučují se
+        # jen AniList `isAdult` TAGY, což je jiná (mnohem granulárnější) množina.
+        # Bez tohohle dotazu proto "Erotica" nemohla do lexikonu nikdy doputovat
+        # a hlásila se jako neohodnocená po každé regeneraci. (Ecchi tu mezeru
+        # náhodou obcházelo přes AniList GenreCollection, Erotica tam nemá
+        # ekvivalent.)
+        for g in jikan.get_genres("explicit_genres"):
+            if g.get("name"):
+                add(g["name"], "MAL: žánry")
 
     if anilist is not None:
         # Žánry zvlášť -- MediaTagCollection je neobsahuje (Media.genres je
