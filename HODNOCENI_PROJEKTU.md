@@ -24,8 +24,11 @@ a proč**.
 > **§9.1** variantou (c) (trojice mají vlastní kalibrovanou škálu, fold-modely
 > klastrují samy → do CV neprosakuje nic) a **§9.2** (vážený kosinus proti
 > plnému těžišti nálady). Detaily a naměřené dopady u jednotlivých nálezů.
-> Testů 165 → **187**, všechny zelené; defaultní cesta kalibrace ověřena jako
-> bitově identická s HEAD. Otevřené zůstává §9.3 a rozvojové body §9.4–§9.8.
+> Testů 165 → **196**, všechny zelené; defaultní cesta kalibrace ověřena jako
+> bitově identická s HEAD. §9.3 **zamítnuta** (její premisa byla chybná —
+> viz §5.5), ale při jejím ověřování se našel a opravil vážnější bug: obsahová
+> discovery větev byla kvůli AND sémantice `tag_in` **mrtvá**. Otevřené
+> zůstávají rozvojové body §9.4–§9.8.
 
 Zbývající nálezy nejsou architektonické, ale konkrétní a lokální. Čtyři, které
 bych řešil první:
@@ -421,20 +424,61 @@ kandidáta, nebo (lépe) si v `_fit_clusters` **uložit centroidy** a počítat 
 vážený kosinus — centroid se stejně počítá (`taste.py:580`) a zahazuje se z něj
 všechno kromě top-6 labelů.
 
-### 5.5 Tag-search discovery je strukturálně znevýhodněná — STŘEDNÍ
+### 5.5 Discovery větev byla MRTVÁ (původní diagnóza byla chybná) — VYSOKÁ
 
-`recommend.py:248`: `bump(m["mal_id"], 0.0, None, "tag-search")` → `item_votes = 0`
-→ `z_item(log1p(0))` = **dno** rozdělení → `w_cf · z_item` = −0,8 × (něco
-kladného) jako fixní srážka.
+> **Stav (2026-07-26): OPRAVENO — ale úplně jinak, než §9.3 navrhovala.**
+> Při implementaci se ukázalo, že **původní nález byl ve dvou bodech
+> špatně**, a skutečný problém byl vážnější. Nechávám tu obojí, ať je vidět,
+> co neplatilo.
 
-Kandidát nalezený obsahovým discovery (tj. přesně ta větev, která má najít, co
-graf podobnosti nezná) tedy startuje s penalizací, která nemá nic společného s
-jeho shodou s vkusem. Pro kandidáty, které našel *i* graf, se to nesečte špatně
-— ale ryze tag-search nálezy se v žebříčku systematicky neobjeví.
+**Co jsem tvrdil:** `bump(m["mal_id"], 0.0, None, "tag-search")` dá
+`item_votes = 0` → `z_item(log1p(0))` je dno rozdělení → `w_cf · z_item` je
+„fixní srážka", kvůli které se ryze tag-search nálezy do žebříčku nedostanou.
+Navrhované řešení: `item_votes = None` a z-skóre jen z kandidátů, kde graf
+nějaký hlas dal.
 
-„Chybějící důkaz z grafu" má být `z = 0` (neutrální), ne `z = min`. Nejčistší
-řešení: `item_votes = None` pro tag-search-only kandidáty a z-skóre počítat jen
-z těch, kde graf nějaký hlas dal.
+**Chyba č. 1 — centrování na pořadí nemá vliv.** Kompozit je součet z-skóre,
+tedy lineárních transformací. V rozdílu dvou kandidátů se průměr vykrátí:
+
+```
+comp_i − comp_j = Σ w_k · (x_ki − x_kj) / sd_k        (mean_k se vyruší)
+```
+
+Ověřeno numericky na reálném poolu: kompozit s centrováním a bez něj dává
+**identické pořadí** a liší se o konstantu (6,566218 pro každého kandidáta).
+„Je na dně rozdělení" tedy není srážka v řazení; jediné, co z-skóre reálně
+řídí, je měřítko (`sd`) a váha `w_cf`. Návrh §9.3 by navíc byl **škodlivý**:
+posunout „bez důkazu" na `z = 0` znamená ohodnotit ho jako *průměrný* důkaz,
+což by discovery nálezy vystřelilo nad kandidáty s podprůměrnou, ale skutečnou
+podporou grafu.
+
+**Chyba č. 2 — tag-search kandidáti neexistovali.** V reálném poolu bylo
+tag-search-only kandidátů **0 ze 414**. Ne proto, že by se propadli, ale proto
+že discovery větev nevracela nic.
+
+**Skutečný nález: `search_by_tags` byla mrtvá.** AniList `tag_in` má **AND**
+sémantiku — vrací jen tituly nesoucí *všechny* vyjmenované tagy. Posílalo se
+tam pět nejcharakterističtějších tagů najednou, což reálně nesplní nic.
+Ověřeno živě: `["Iyashikei"]` → 50 titulů, `["Iyashikei","Reincarnation"]` →
+18, tři niche tagy → **0**. Celá obsahová discovery větev tedy tiše vracela
+prázdno a **nešlo si toho všimnout** — prázdný výsledek je legitimní návratová
+hodnota, ne chyba, takže nepadl ani warning.
+
+Opraveno dotazem **na každý tag zvlášť** se sjednocením výsledků. Dopad:
+
+| | před | po |
+|---|---|---|
+| kandidátů v poolu | 404 | **515** |
+| z toho čistě obsahových (bez grafu) | 0 | **111** |
+| nejlepší obsahový nález | — | **#5** (Mushoku Tensei III, taste_fit +1,41, MAL 8,88) |
+
+Ten titul rec graf nezná (je čerstvý) a model ho vytáhl čistě podle obsahu —
+přesně k tomu ta větev je. Zbytek se drží při zemi (medián #517 z 675 při
+`pages=2`), což je v pořádku: chybějící podpora grafu *je* legitimní mínus.
+
+Volba `pages=1` na tag: druhá stránka přidala 160 kandidátů k obohacení, ale
+do top-40 z nich neprošel ani jeden — stejný přínos za dvojnásobnou cenu.
+Discovery teď stojí 5 requestů (dřív 2, které nevracely nic).
 
 ### 5.6 `except Exception: print(...)` polyká chyby po hodinách práce — STŘEDNÍ
 
@@ -699,9 +743,17 @@ stabilní (top-10 beze změny). Původní rozvaha:
 > by to byla shoda s celým profilem nálady. Zároveň vytáhnout magickou 0,5
 > z `taste_fit` do configu (§1).
 
-**9.3 Neutrální z-skóre pro chybějící graf (§5.5).** `item_votes = None` u
-tag-search-only kandidátů, z-skóre počítat jen z nenulových. Obsahové discovery
-tím dostane šanci, kterou dnes strukturálně nemá.
+**9.3 Neutrální z-skóre pro chybějící graf (§5.5).** ❌ **ZAMÍTNUTO
+2026-07-26 — premisa byla chybná**, viz §5.5. Centrování z-skóre pořadím
+nehýbe (ověřeno numericky: identické pořadí, konstantní posun 6,566218), takže
+žádná „fixní srážka" neexistovala; a navržená změna by byla škodlivá — „bez
+důkazu" by se ohodnotilo jako *průměrný* důkaz.
+
+✅ Místo toho opraven **skutečný** problém, který se pod tím schovával:
+`search_by_tags` posílala pět tagů do `tag_in`, který má **AND** sémantiku, a
+celá obsahová discovery větev tak tiše vracela **0 kandidátů**. Po opravě
+(dotaz per tag) pool 404 → 515, z toho 111 čistě obsahových nálezů a jeden
+na **#5**. Testy `test_search_by_tags_*` v `tests/test_anilist.py`.
 
 ### Nový potenciál (návrhy k rozhodnutí)
 

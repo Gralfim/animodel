@@ -315,3 +315,57 @@ def test_user_animelist_private_is_permanent_none(tmp_path, no_sleep):
     assert post.calls == 1
     assert client.get_user_animelist(42) is None   # z cache, žádný další request
     assert post.calls == 1
+
+
+# ── discovery: tag-search se ptá na KAŽDÝ tag zvlášť ─────────────────────
+
+def _media_page(*ids):
+    return FakeResponse(200, {"data": {"Page": {"media": [
+        {"idMal": i, "title": {"romaji": f"T{i}"}, "averageScore": 80,
+         "popularity": 100} for i in ids]}}})
+
+
+def test_search_by_tags_queries_each_tag_separately(tmp_path, no_sleep):
+    """AniList `tag_in` je AND -- pět charakteristických tagů najednou
+    nesplní nic (ověřeno živě: 1 tag → 50 titulů, 3 niche tagy → 0), takže
+    celá discovery větev tiše vracela prázdno. Ptáme se proto per tag."""
+    client, post = make_client(
+        tmp_path, [_media_page(1, 2), _media_page(3)], no_sleep)
+
+    out = client.search_by_tags(["Iyashikei", "Age Gap"], pages=1)
+
+    assert post.calls == 2, "každý tag musí dostat vlastní request"
+    assert [r["mal_id"] for r in out] == [1, 2, 3]
+    # co přesně šlo do dotazů ověřuje test níž (spy nad session.post)
+
+
+def test_search_by_tags_sends_single_tag_per_request(tmp_path, no_sleep):
+    client, post = make_client(tmp_path, [_media_page(1), _media_page(2)], no_sleep)
+    seen = []
+    orig = client.session.post
+
+    def spy(url, json=None, timeout=20):
+        seen.append(json["variables"]["tags"])
+        return orig(url, json=json, timeout=timeout)
+
+    client.session.post = spy
+    client.search_by_tags(["A", "B"], pages=1)
+    assert seen == [["A"], ["B"]], "do dotazu smí jít vždy jen jeden tag"
+
+
+def test_search_by_tags_deduplicates_across_tags(tmp_path, no_sleep):
+    """Tentýž titul nesoucí víc mých tagů se nesmí vrátit dvakrát --
+    v recommend.py by pak bump() nafoukl jeho cf_seeds/sources."""
+    client, post = make_client(
+        tmp_path, [_media_page(1, 2), _media_page(2, 3)], no_sleep)
+    out = client.search_by_tags(["A", "B"], pages=1)
+    assert [r["mal_id"] for r in out] == [1, 2, 3]
+
+
+def test_search_by_tags_failure_on_one_tag_keeps_the_rest(tmp_path, no_sleep):
+    """Selhání jednoho tagu nesmí zahodit discovery celé -- ostatní tagy
+    se doptají dál."""
+    bad = FakeResponse(400, text='{"errors":[{"message":"bad tag"}]}')
+    client, post = make_client(tmp_path, [bad, _media_page(7)], no_sleep)
+    out = client.search_by_tags(["Broken", "Fine"], pages=1)
+    assert [r["mal_id"] for r in out] == [7]

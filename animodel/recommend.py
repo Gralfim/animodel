@@ -240,9 +240,15 @@ class Recommender:
             top_tags = [e.label for e in self.model.top_effects(n=40, sign=1)
                         if e.category in ("tag", "theme", "genre")][:8]
             if top_tags:
+                # pages=1 na tag: search_by_tags se od opravy ptá na KAŽDÝ tag
+                # zvlášť (AniList `tag_in` je AND -- viz jeho docstring), takže
+                # 5 tagů × 1 stránka = 5 requestů a ~150 neshlédnutých titulů.
+                # Změřeno: druhá stránka přidá 160 kandidátů k obohacení, ale
+                # do top-40 se z nich nedostane ani jeden -- stejný přínos za
+                # dvojnásobnou cenu.
                 matches = call_source(
                     "AniList-rec",
-                    lambda: self.enr.anilist.search_by_tags(top_tags[:5], pages=2),
+                    lambda: self.enr.anilist.search_by_tags(top_tags[:5], pages=1),
                 )
                 for m in matches:
                     bump(m["mal_id"], 0.0, None, "tag-search")

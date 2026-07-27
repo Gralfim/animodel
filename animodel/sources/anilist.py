@@ -399,23 +399,43 @@ class AniListClient:
     }"""
 
     def search_by_tags(self, tags: list[str], pages: int = 2) -> list[dict]:
-        """Discovery: tituly s danými tagy, seřazené dle skóre. Necachuje se
-        (čistě průběžný discovery dotaz, ne perzistentní znalost o titulu)."""
-        out = []
-        for p in range(1, pages + 1):
-            result = self._request(self.TAG_SEARCH, {"tags": tags, "page": p})
-            if not result.ok:
-                break
-            media = result.data.get("data", {}).get("Page", {}).get("media", [])
-            for m in media:
-                if m.get("idMal"):
-                    out.append({
-                        "mal_id": m["idMal"],
-                        "title": (m.get("title") or {}).get("romaji", ""),
-                        "community": (m.get("averageScore") or 0) / 10.0,
-                    })
-            if len(media) < 50:
-                break
+        """
+        Discovery: tituly nesoucí NĚKTERÝ z `tags`, seřazené dle skóre.
+        Deduplikované přes mal_id. Necachuje se (čistě průběžný discovery
+        dotaz, ne perzistentní znalost o titulu).
+
+        POZOR na sémantiku: AniList `tag_in` je **AND** -- vrací jen tituly
+        nesoucí VŠECHNY vyjmenované tagy. Dřív se sem posílalo pět
+        nejcharakterističtějších tagů najednou, což je podmínka, kterou
+        reálně nesplní nic. Ověřeno živě (2026-07-26): 1 tag → 50 titulů,
+        `["Iyashikei","Reincarnation"]` → 18, tři niche tagy → **0**. Celá
+        discovery větev proto tiše vracela prázdno (0 kandidátů ze 414) a
+        nešlo si toho všimnout -- prázdný výsledek je legitimní návratová
+        hodnota, ne chyba, takže se nikde neobjevil warning.
+
+        Ptáme se proto na KAŽDÝ tag zvlášť a výsledky sjednotíme; to je
+        sémantika, kterou „najdi mi tituly s mými charakteristickými tagy"
+        doopravdy potřebuje. Cena: až `len(tags) × pages` requestů.
+        """
+        out: list[dict] = []
+        seen: set[int] = set()
+        for tag in tags:
+            for p in range(1, pages + 1):
+                result = self._request(self.TAG_SEARCH, {"tags": [tag], "page": p})
+                if not result.ok:
+                    break
+                media = result.data.get("data", {}).get("Page", {}).get("media", [])
+                for m in media:
+                    mid = m.get("idMal")
+                    if mid and mid not in seen:
+                        seen.add(mid)
+                        out.append({
+                            "mal_id": mid,
+                            "title": (m.get("title") or {}).get("romaji", ""),
+                            "community": (m.get("averageScore") or 0) / 10.0,
+                        })
+                if len(media) < 50:
+                    break
         return out
 
     # ── User-based CF ───────────────────────────────────────────────────────
