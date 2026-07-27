@@ -24,6 +24,8 @@ from .taste import TasteModel
 from .recommend import Recommender
 from . import report
 
+log = logging.getLogger(__name__)
+
 
 def _build_stats(model, by_status, titles) -> dict:
     dist = {}
@@ -265,6 +267,30 @@ def run(args) -> int:
     elif cfg.recommend.use_user_cf:
         print("      [CF report přeskočen — žádné výsledky]")
 
+    # ── Historie: zapiš tenhle běh a vyhodnoť starší ────────────────────
+    # Klíčem je OTISK STAVU SEZNAMU, ne datum -- ladicí běhy nad týmž
+    # exportem přepíšou jeden snapshot místo aby jich nasypaly desítky
+    # (viz history.py). Diagnostika nikdy nesmí shodit běh.
+    if cfg.recommend.save_history and not args.no_history:
+        try:
+            from . import history
+            snap = history.build_snapshot(
+                entries, recs_all, model, cfg,
+                top=cfg.recommend.history_top)
+            older = [s for s in history.load_snapshots(cfg.history_dir)
+                     if s.fingerprint != snap.fingerprint]
+            path = history.save_snapshot(snap, cfg.history_dir)
+            print(f"      → {path}  (otisk seznamu {snap.fingerprint})")
+            results = [r for r in (history.evaluate(s, entries) for s in older)
+                       if r]
+            for line in history.format_report(results):
+                print(line)
+            if older and not results:
+                print("      [historie] starší snapshoty zatím bez měřitelného "
+                      "výsledku (žádné doporučení jsi mezitím nedokoukal)")
+        except Exception:
+            log.exception("historie: záznam/vyhodnocení selhalo -- běh pokračuje")
+
     print("[hotovo]")
     return 0
 
@@ -284,6 +310,11 @@ def main(argv=None) -> int:
                         "MAL rec graf se přeskočí")
     p.add_argument("--no-recommend", action="store_true", help="jen model, bez doporučení")
     p.add_argument("--user-cf", action="store_true", help="zapni user-based CF (pomalé)")
+    p.add_argument("--no-history", action="store_true",
+                   help="nezapisuj tenhle běh do historie (viz history.py); "
+                        "běžně není potřeba -- snapshoty se klíčují otiskem "
+                        "seznamu, takže ladicí běhy nad týmž exportem "
+                        "přepisují jeden záznam, nehromadí se")
     p.add_argument("--season", nargs="*", metavar="ROK SEZÓNA",
                    help="doporučení pro vysílanou sezónu (pokračování tvých sérií "
                         "+ nové tituly, s datem posledního dílu). Bez argumentu = "

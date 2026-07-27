@@ -14,6 +14,7 @@ env
 cache
 output
 output_backup
+history
 animelist.xml
 config.yaml
 intensity.yaml

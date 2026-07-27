@@ -94,6 +94,13 @@ class RecommendCfg:
     min_mal_rec_votes: int = 5        # MAL: min. počet uživatelských hlasů
     min_anilist_rec_rating: int = 3   # AniList: min. čistý rating doporučení
     min_community: float = 6.5        # nedoporučuj pod tímto komunitním skóre
+    save_history: bool = True         # zapisovat běhy do history_dir (klíč =
+                                      # otisk stavu seznamu, ne datum, takže
+                                      # ladicí běhy nad týmž exportem se
+                                      # přepisují -- viz history.py)
+    history_top: int = 100            # kolik doporučení do snapshotu; víc než
+                                      # top_n, ať má pozdější evaluace statistiku
+                                      # i pod hranicí zobrazeného přehledu
     top_n: int = 40                   # kolik doporučení ve globálním přehledu
     top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu
     # -- sezónní doporučení (--season, viz season.py) --
@@ -140,6 +147,10 @@ class Config:
     mal_export: str = "animelist.xml"
     cache_dir: str = "cache"
     out_dir: str = "output"
+    history_dir: str = "history"      # záznamy běhů pro zpětnou vazbu
+                                      # (viz history.py). ZÁMĚRNĚ mimo out_dir:
+                                      # output/ se přepisuje a maže, historie
+                                      # musí přežít.
     model: ModelCfg = field(default_factory=ModelCfg)
     enrich: EnrichCfg = field(default_factory=EnrichCfg)
     recommend: RecommendCfg = field(default_factory=RecommendCfg)

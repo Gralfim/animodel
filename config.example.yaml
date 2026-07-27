@@ -4,6 +4,9 @@
 
 cache_dir: cache
 out_dir: output
+history_dir: history      # záznamy běhů pro zpětnou vazbu (viz --no-history).
+                          # Mimo out_dir schválně: output/ se přepisuje, historie
+                          # musí přežít
 
 model:
   shrinkage_k: 8.0          # vyšší = konzervativnější efekty (malé vzorky víc tlumeny)
@@ -60,6 +63,11 @@ recommend:
   min_anilist_rec_rating: 3 # ignoruj AniList doporučení se slabším ratingem
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
   top_n: 40
+  save_history: true        # zapisovat běhy do history_dir. Snapshot se klíčuje
+                            # OTISKEM STAVU SEZNAMU, ne datem — ladicí běhy nad
+                            # týmž exportem tedy přepisují jeden záznam
+  history_top: 100          # kolik doporučení do snapshotu (víc než top_n, ať má
+                            # pozdější vyhodnocení statistiku i pod hranicí přehledu)
   season_min_prequel_score: 7.0  # od jaké mé známky předchozí řady se sezónní
                                  # pokračování počítá jako „moje série" (--season)
   season_top_new: 30             # kolik nových titulů v sezónním přehledu

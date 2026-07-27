@@ -758,6 +758,44 @@ na **#5**. Testy `test_search_by_tags_*` v `tests/test_anilist.py`.
 ### Nový potenciál (návrhy k rozhodnutí)
 
 **9.4 Zpětná vazba z historie — největší nevyužitá příležitost.**
+✅ **ZÁKLAD HOTOV 2026-07-26** (`animodel/history.py`, 20 testů).
+
+> **Změna proti původnímu návrhu (podnět uživatele):** snapshoty se
+> **neklíčují datem, ale otiskem stavu seznamu**. Ladění parametrů znamená
+> desítky běhů nad týmž exportem a datové klíčování by z nich udělalo
+> desítky skoro identických záznamů, které by evaluaci jen ředily (tentýž
+> stav světa započítaný mnohokrát).
+>
+> Otisk = sha256 nad seřazenými trojicemi `(mal_id, status, score)`, tedy nad
+> tím, co model konzumuje a co zároveň tvoří ground truth. **Záměrně ne hash
+> souboru:** `my_watched_episodes` a `my_finish_date` se v exportu mění
+> průběžně, takže hash bajtů by se lišil po každém odsledovaném dílu, aniž by
+> se změnilo cokoli podstatného. Naopak přesun do Completed nebo změna známky
+> otisk změní — a to je nový stav světa, který si zaslouží vlastní záznam.
+> Stejný otisk = přepis (poslední běh vyhrává). Ověřeno: **tři ladicí běhy
+> s různým `--shrinkage` daly jeden soubor.**
+>
+> Název `{počet_hodnocených}_{otisk}.json` (druhá varianta z podnětu) dává
+> složce chronologickou čitelnost — seznam v čase roste, takže abecední
+> řazení odpovídá časovému.
+>
+> **Metriky.** Klíčová není hit rate, ale **Δ proti kontrole**: průměrná
+> známka doporučených titulů dokoukaných od snapshotu proti průměru
+> *ostatních* titulů dokoukaných za tutéž dobu. Teprve to odpovídá na
+> „jsou doporučení lepší než to, co bych si vybral sám?". Hit rate je vždy
+> jen spodní odhad (jmenovatel je celý snapshot, čitatel to, co se stihlo
+> dokoukat). Vedle toho průměrná známka **po desítkách pořadí** — přímá
+> validace *řazení*, tedy přesně to, co CV RMSE změřit neumí.
+>
+> Ověřeno end-to-end na simulovaném budoucím exportu (tři doporučené tituly
+> přesunuté do Completed + kontrolní skupina): `doporučené 8.67 (n=3) vs.
+> ostatní nové 6.50 (n=4), Δ +2.17`, pořadí 1–10 průměr 9.00, 11–20 průměr
+> 8.00. Simulovaný snapshot i testovací `history/` po ověření smazány, ať
+> nekazí budoucí vyhodnocení skutečných běhů.
+>
+> **Co zbývá:** (a) HTML sekce místo jen CLI výpisu, (b) druhý krok z návrhu
+> níž — ladit `w_taste_fit / w_cf / w_user_cf / w_quality` proti naměřenému
+> výsledku, což jde ale až s několika snapshoty za sebou. Původní záměr:
 Každý nový MAL export je **ground truth pro předchozí doporučení** a dnes se
 zahazuje. Konkrétně: uložit každý běh do `output/history/{datum}.json` (mal_id,
 composite, taste_fit, pred, pořadí). Při dalším běhu spárovat s aktuálním

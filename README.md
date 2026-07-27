@@ -34,6 +34,7 @@ python -m animodel -e animelist.xml --analyze        # jen přehled franšízov�
 python -m animodel -e animelist.xml --gen-intensity  # (re)generace intensity.yaml (osa náročnosti)
 python -m animodel -e animelist.xml --season         # doporučení pro aktuální vysílanou sezónu
 python -m animodel -e animelist.xml --season 2026 summer  # konkrétní sezóna
+python -m animodel -e animelist.xml --no-history     # nezapisuj běh do historie
 python -m animodel -e animelist.xml --verbose        # + rutinní retry/rate-limit hlášky (INFO)
 ```
 
@@ -204,6 +205,41 @@ Pro každý titul: originální i anglický název, synopse, odůvodnění (kter
 a které tvé oblíbené ho táhnou), MAL skóre, odhad tvého hodnocení jako interval,
 a do jaké tvé nálady patří.
 
+### Zpětná vazba z historie
+
+Každý nový MAL export je **ground truth pro předchozí doporučení** — když se
+doporučený titul o pár měsíců později objeví v Completed s devítkou, model
+fungoval. Každý běh se proto zapíše do `history/` a při dalším **změněném**
+exportu se vyhodnotí:
+
+```
+── Zpětná vazba z historie ─────────────────────────────
+  snapshot 1efb7447d8cf (2026-07-27, 100 doporučení):
+    dokoukáno 3 (3%) · rozkoukáno 0 · dropnuto 0 · nově v PTW 0
+    tvá známka: doporučené 8.67 (n=3) vs. ostatní nové 6.50 (n=4)  Δ +2.17
+      pořadí 1–10: 2× průměr 9.00
+      pořadí 11–20: 1× průměr 8.00
+```
+
+Klíčové číslo je **Δ proti kontrole**: průměrná známka doporučených titulů,
+které jsi mezitím dokoukal, proti průměru ostatních titulů dokoukaných za
+tutéž dobu. Teprve to odpovídá na otázku „jsou doporučení lepší než to, co
+bych si vybral sám?". `hit rate` je naproti tomu vždycky jen spodní odhad
+(jmenovatel je celý snapshot, ale za pár měsíců stihneš dokoukat jednotky) —
+smysl dává hlavně jeho vývoj v čase.
+
+**Snapshoty se klíčují otiskem stavu seznamu, ne datem.** Ladění parametrů
+znamená desítky běhů nad týmž exportem; datové klíčování by z nich udělalo
+desítky skoro identických záznamů a evaluaci by to ředilo. Otisk se počítá
+z trojic `(mal_id, status, score)` — tedy z toho, co model konzumuje a co
+zároveň tvoří ground truth. Odsledovaný díl ani datum dokončení otisk
+nezmění (hash souboru by se změnil), přesun titulu do Completed nebo změna
+známky ano. Stejný otisk = přepis, takže **ladicí běhy hromadí jeden záznam,
+ne sto**. Soubory se jmenují `{počet_hodnocených}_{otisk}.json`, aby šla
+složka číst chronologicky.
+
+Vypnout jde `--no-history` nebo `recommend.save_history: false`.
+
 ### Sezónní doporučení (`--season`)
 
 `python -m animodel -e animelist.xml --season` vygeneruje
@@ -268,6 +304,7 @@ animodel/
   intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
   usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
   season.py         sezónní doporučení (--season): pokračování + nové tituly + finále
+  history.py        záznam běhů (klíč = otisk seznamu) + zpětná vazba z nového exportu
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
   taste.py          jádro: baseline, afinitní efekty, interakce, nálady, predikce
