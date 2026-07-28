@@ -31,6 +31,7 @@ python -m animodel -e animelist.xml --no-jikan       # nouzový AniList-only re�
 python -m animodel -e animelist.xml --shrinkage 12   # konzervativnější efekty
 python -m animodel -e animelist.xml --user-cf        # + user-based CF (pomalé)
 python -m animodel -e animelist.xml --analyze        # jen přehled franšízových skupin, bez modelu
+python -m animodel -e animelist.xml --analyze-attrs  # diagnostika kanonizace atributů
 python -m animodel -e animelist.xml --gen-intensity  # (re)generace intensity.yaml (osa náročnosti)
 python -m animodel -e animelist.xml --season         # doporučení pro aktuální vysílanou sezónu
 python -m animodel -e animelist.xml --season 2026 summer  # konkrétní sezóna
@@ -116,6 +117,15 @@ animodel proto **necílí na známku, ale na odchylku**:
 studia, zdroj, dekáda, formát, demografie) se **objevují samy z dat**.
 `attributes.py` je kanonizuje a **dedupuje napříč zdroji** (MAL „Drama" a AniList
 tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát.
+
+Tichý selhací mód téhle vrstvy je „dva klíče pro jeden koncept": nikde to
+nespadne, jen se evidence rozdělí na dvě poloviny, obě se silněji smrští
+k nule a efekt zmizí. `--analyze-attrs` proto hledá dvojice atributů, které
+vypadají jako týž koncept a `ALIAS` je nespojuje — porovnáním **po slovech**
+(shodná slova v jiném tvaru/pořadí, nebo jednoslovné klíče lišící se jen
+koncovkou). Na živých datech to našlo `Video Game` ↔ `Video Games` a
+`Anthropomorphic` ↔ `Anthropomorphism` — v obou případech MAL a AniList
+pojmenovaly totéž jinak; oba páry jsou teď v `ALIAS`.
 Franšízy (sequel/prequel/side story) se přes union-find slučují a členové
 dostávají tlumené váhy: hlavní řady `1/√k_eff`, vedlejší obsah (OVA, speciály,
 side story — poznané podle formátu nebo parent-story vazby) ještě míň
@@ -295,6 +305,7 @@ animodel/
   sources/
     __init__.py     sdílené utility (progress výpisy, Result typ pro úspěch/selhání)
     cache.py        sdílený cache primitiv (FileCache, cached_fetch) -- 1 klíč = 1 soubor
+                    (každý klient dostane kořen cache a doplní si podsložku)
     http.py         sdílený retry/backoff driver (request_with_retry, rate limitery)
     jikan.py        MAL data + recommendations + search (Jikan-kompat. API: Tenrai/Jikan)
     anilist.py      AniList tagy + recommendations + tag-search + user-based CF
@@ -373,6 +384,27 @@ bere primárně z MAL, fallback AniList — záměrně se **neprůměrují** (js
 korelované, průměrování nepřináší informaci a riskuje zkreslení).
 
 ### Úklid cache
+
+Každý zdroj má vlastní podsložku, takže jde invalidovat jednotlivě:
+
+```
+cache/
+  mal/        MAL data přes Jikan-kompat. API (/full, /staff, /recommendations, sezóny)
+  anilist/    AniList Media, doporučení, universum tagů
+  cf_al/      user-CF: stránky sledujících + seznamy uživatelů
+  shikimori/  /similar (jen když enrich.use_shikimori)
+```
+
+```bash
+rm -r cache/mal        # jen MAL data, AniList i CF zůstanou
+```
+
+> Pokud máš cache z verze před 2026-07-26, leží MAL data přímo v `cache/`.
+> Přesuň je jednou do `cache/mal/`, jinak se stáhnou znovu (u ~10 tis.
+> titulů jde o hodiny):
+> ```bash
+> mkdir -p cache/mal && find cache -maxdepth 1 -type f -name '*.json' -exec mv {} cache/mal/ \;
+> ```
 
 Cache nemá expiraci (záměr — maž ručně, když chceš čerstvá data; 1 request =
 1 soubor, takže jde smazat i jen část). **Pozor na verzované klíče:** když se

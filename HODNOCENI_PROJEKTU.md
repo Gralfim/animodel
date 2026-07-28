@@ -24,11 +24,11 @@ a proč**.
 > **§9.1** variantou (c) (trojice mají vlastní kalibrovanou škálu, fold-modely
 > klastrují samy → do CV neprosakuje nic) a **§9.2** (vážený kosinus proti
 > plnému těžišti nálady). Detaily a naměřené dopady u jednotlivých nálezů.
-> Testů 165 → **196**, všechny zelené; defaultní cesta kalibrace ověřena jako
+> Testů 165 → **250**, všechny zelené; defaultní cesta kalibrace ověřena jako
 > bitově identická s HEAD. §9.3 **zamítnuta** (její premisa byla chybná —
 > viz §5.5), ale při jejím ověřování se našel a opravil vážnější bug: obsahová
 > discovery větev byla kvůli AND sémantice `tag_in` **mrtvá**. Otevřené
-> zůstávají rozvojové body §9.4–§9.8.
+> zůstává už jen druhý krok §9.4 — ladit váhy kompozitu proti naměřenému výsledku, což jde až s několika snapshoty za sebou.
 
 Zbývající nálezy nejsou architektonické, ale konkrétní a lokální. Čtyři, které
 bych řešil první:
@@ -893,23 +893,105 @@ Dopad je malý a je to tak správně: intenzity nálad se posunuly nejvýš
 o **0,012** (nízkofrekvenční atributy s mírnými hodnotami). Jde o úplnost
 a o to, že diagnostika je teď čistá (1 → 0 neohodnocených).
 
-**9.5 Diagnostika kanonizace atributů (§6).** `--analyze-attrs`: vypsat klíče,
+**9.5 Diagnostika kanonizace atributů (§6).** ✅ **HOTOVO 2026-07-26** —
+`--analyze-attrs` + `attributes.find_near_duplicate_keys()`.
+
+> **Naivní verze byla k ničemu a musel jsem ji přepsat.** Původní návrh
+> (Levenshtein ≤2 nad celými klíči) dal na živých datech **19 dvojic, z toho
+> 2 skutečné** — znaková vzdálenost totiž nerozliší „jiný token" od „jiná
+> koncovka": `female_protagonist` ↔ `male_protagonist` má vzdálenost 2 úplně
+> stejně jako `video_game` ↔ `video_games`, přestože první dvojice jsou dva
+> různé koncepty a druhá jeden. S takovým poměrem šumu by nástroj nikdo
+> nepoužil.
+>
+> Přepsáno na porovnání **po slovech**: (1) shodná slova po stemmingu
+> množného čísla, nezávisle na pořadí; (2) jednoslovné klíče s editační
+> vzdáleností ≤2 **a** společným prefixem ≥ 70 % délky kratšího (tedy
+> „liší se jen koncovkou"). Výsledek na týchž datech: **2 dvojice, obě
+> skutečné**, žádný falešný nález.
+>
+> | nález | zdroje | výskyty |
+> |---|---|---|
+> | `video_game` ↔ `video_games` | MAL téma vs. AniList tag | 12× a 33× |
+> | `anthropomorphic` ↔ `anthropomorphism` | MAL téma vs. AniList tag | 4× a 9× |
+>
+> Oba páry doplněny do `ALIAS`. Evidence se tím slévá místo aby se dělila —
+> u `video_game` šlo o 12 + 33 titulů rozpadlých na dvě poloviny.
+>
+> **Vedlejší nález při té příležitosti:** přidání aliasu odhalilo latentní
+> chybu v `load_lexicon()`. Když dva řádky `intensity.yaml` spadnou po
+> kanonizaci na tentýž klíč, tiše vyhrál ten pozdější v souboru — takže
+> `video_games: 0` („neohodnoceno") by přepsalo `video_game: -0.1`. Teď se
+> kolize hlásí a nenulová hodnota má přednost před nulou. Týkalo by se to
+> každého budoucího aliasu, ne jen tohohle. `--analyze-attrs`: vypsat klíče,
 které se liší jen málo (Levenshtein ≤2, nebo shodné po odstranění stop-slov) a
 **nejsou** v `ALIAS`. Jediný tichý selhací mód `attributes.py` je „dva klíče pro
 jeden koncept" a ten systematicky nafukuje efekty — přesně to, čemu má modul
 zabránit. Levné, jednorázově užitečné.
 
-**9.6 Vyčistit privátní rozhraní mezi vrstvami (§2).** `Recommender.recommend()`
+**9.6 Vyčistit privátní rozhraní mezi vrstvami (§2).** ✅ **HOTOVO 2026-07-26.**
+
+> - `Recommender.recommend()` vrací `RecommendResult(recs, senpai, cf_raw)`
+>   místo aby CF část předával privátními atributy čtenými přes
+>   `getattr(rec, "_cf_raw_results", [])`. Ten kontrakt byl implicitní:
+>   přejmenování atributu by nic nerozbilo, jen by tiše zmizel CF report.
+>   Výsledek je iterovatelný a má `len()`, takže volající, kterého CF
+>   nezajímá, se chová jako dřív.
+> - `Recommendation.prequel_score` je skutečné pole místo dynamicky
+>   přišpendleného `rec._prequel_score` čteného přes `getattr` — fungovalo,
+>   ale rozbilo by se tiše při `slots=True`.
+> - `model._raw_resid_pred()` volaný z jiných modulů nahradilo veřejné
+>   `affinity()` (už v §9.1) — `_raw_resid_pred` zůstává jako interní
+>   diagnostika neškálovaného součtu. `Recommender.recommend()`
 by vracel `RecommendResult(recs, senpai, cf_raw)` místo tří privátních atributů;
 `_raw_resid_pred` → veřejné `affinity()`; `_prequel_score` → skutečné pole
 `Recommendation`. Nic to nerozbije a odstraní tři místa, kde tichá regrese
 neshodí testy.
 
-**9.7 Rozpad `cli.py::run()`** na `run_model / run_season / run_analyze /
+**9.7 Rozpad `cli.py::run()`** ✅ **HOTOVO 2026-07-26.**
+
+> Jedna 215řádková funkce se čtyřmi early-return větvemi je teď `run()`,
+> které jen vybere režim, plus `run_analyze / run_analyze_attrs /
+> run_gen_intensity / run_season / run_recommend` nad sdíleným
+> `RunContext` (načtený seznam + enricher + odvozené `watched_ids`/`ptw_ids`).
+> Vytažené i `_apply_overrides`, `_check`, `_exclude_own_account`,
+> `_render_cf_report`, `_record_history`.
+>
+> **Číslování kroků drží třída `Steps`** — každý režim řekne, kolik kroků má,
+> a pořadí se dopočítá. Ruční `[4/4]` vs. `[1/5]` se tím rozejít nemůže.
+>
+> Ironická poznámka k tomu: **při prvním ostrém běhu se to rozešlo hned zas**
+> (`--analyze-attrs` tiskl `[3/2]`, protože jsem do součtu zapomněl vlastní
+> krok navíc). Opraveno dvakrát: `_mode_steps()` teď vrací jen kroky *po*
+> `prepare()` a celek se skládá jako `PREPARE_STEPS + _mode_steps()`, takže
+> vztah je vidět; a `Steps` na přetečení zaloguje warning, aby to příště
+> nemohlo projít potichu. Ověřeno na všech pěti režimech. na `run_model / run_season / run_analyze /
 run_gen_intensity` nad společným `prepare(cfg)`. Sjednotit číslování kroků
 (`[4/4]` vs `[5/5]`).
 
-**9.8 Volitelně: Jikan cache do `cache/mal/`** (§2) — sjednotí to s ostatními
+**9.8 Jikan cache do `cache/mal/`** (§2) ✅ **HOTOVO 2026-07-26.**
+
+> Všichni tři klienti teď berou **kořen** cache a podsložku si doplní sami
+> (`cache/mal`, `cache/anilist` + `cache/cf_al`, `cache/shikimori`). Kořen
+> tak obsahuje jen podsložky a invalidace jednoho zdroje je `rm -r cache/mal`
+> místo globu. Cestou zmizela i asymetrie, kdy Shikimori jako jediný
+> očekával už složenou cestu a volající mu ji skládal
+> (`f"{cache_dir}/shikimori"`).
+>
+> Migrace uživatelovy cache provedena jednorázově: **10 427 souborů / 112 MB**
+> přesunuto do `cache/mal/`. Ověřeno průkazně — po zakázání
+> `requests.Session.get/post` se celý seznam (458 titulů) obohatil **bez
+> jediného síťového requestu**, takže se nic neztratilo.
+>
+> **Automatickou migraci jsem záměrně nepřidal.** Byl by to kus kódu, který
+> po jednom použití zůstane v repozitáři navždy a zhorší čitelnost přesně té
+> vrstvy, kterou tenhle bod čistí. Místo toho je v README jednořádkový příkaz
+> pro případ, že se někde objeví stará cache (jiný stroj, záloha). Testy
+> `test_each_client_uses_its_own_subdirectory`,
+> `test_cache_root_holds_no_loose_files`,
+> `test_enricher_gives_all_clients_the_same_root`.
+
+Původní poznámka: — sjednotí to s ostatními
 třemi klienty a udělá selektivní invalidaci `rm -r`-schopnou. Vyžaduje jednorázový
 přesun ~10 tis. souborů, jinak se cache znovu stáhne. Čistě kosmetika, spíš
 „až se to bude hodit".

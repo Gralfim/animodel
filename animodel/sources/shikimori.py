@@ -50,9 +50,13 @@ RETRY_DELAYS = [2, 5, 10]
 
 
 class ShikimoriClient:
-    def __init__(self, cache_dir: str = "cache/shikimori", user_agent: str = "animodel",
+    def __init__(self, cache_dir: str = "cache", user_agent: str = "animodel",
                  sleep: Callable[[float], None] = time.sleep):
-        self._cache = FileCache(Path(cache_dir))
+        # `cache_dir` je KOŘEN cache (stejná konvence jako Jikan/AniList) --
+        # podsložku si klient doplní sám. Dřív tenhle jediný očekával už
+        # hotovou cestu a volající mu ji skládal (`f"{cache_dir}/shikimori"`),
+        # což byla zbytečná asymetrie mezi třemi jinak stejnými klienty.
+        self._cache = FileCache(Path(cache_dir) / "shikimori")
         self._rate_limiter = FixedRateLimiter(REQUEST_DELAY)
         self._sleep = sleep
         self.session = requests.Session()

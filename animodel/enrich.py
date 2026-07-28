@@ -125,8 +125,10 @@ class Enricher:
             JikanClient(cfg.cache_dir, base_url=cfg.enrich.anime_api_base_url)
             if cfg.enrich.use_jikan else None)
         self.anilist = anilist or (AniListClient(cfg.cache_dir) if cfg.enrich.use_anilist else None)
+        # Všichni tři klienti berou KOŘEN cache a podsložku si doplní sami
+        # (cache/mal, cache/anilist + cache/cf_al, cache/shikimori).
         self.shikimori = shikimori or (
-            ShikimoriClient(f"{cfg.cache_dir}/shikimori") if cfg.enrich.use_shikimori else None
+            ShikimoriClient(cfg.cache_dir) if cfg.enrich.use_shikimori else None
         )
 
     def enrich_ids(self, mal_ids: list[int], show_progress=True) -> dict[int, Enriched]:

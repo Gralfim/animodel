@@ -89,7 +89,8 @@ def finale_date(airing: dict | None) -> str | None:
 
 
 def _make_rec(model, en, ptw: bool, airing: dict | None,
-              season_note: str | None) -> Recommendation:
+              season_note: str | None,
+              prequel_score: float = 0.0) -> Recommendation:
     """Enriched titul → Recommendation s predikcí, 'proč' a airing údaji."""
     pred, lo, hi, contribs = model.predict(en.attrs, en.community)
     return Recommendation(
@@ -103,6 +104,7 @@ def _make_rec(model, en, ptw: bool, airing: dict | None,
         broadcast=(airing or {}).get("broadcast"),
         airing_status=(airing or {}).get("status"),
         season_note=season_note,
+        prequel_score=prequel_score,
     )
 
 
@@ -178,9 +180,8 @@ def build_season_view(model, enricher, my_scores: dict[int, float],
             prequel = my_enr.get(linked[0])
             pname = prequel.title if prequel else f"#{linked[0]}"
             note = f"pokračování: {pname} (tvá známka {linked[1]:.0f})"
-            rec = _make_rec(model, en, ptw, airing.get(mid), note)
-            rec._prequel_score = linked[1]   # jen pro řazení
-            sequels.append(rec)
+            sequels.append(_make_rec(model, en, ptw, airing.get(mid), note,
+                                     prequel_score=linked[1]))
         else:
             note = None
             if linked:   # franšíza, kterou znám, ale hodnotil jsem < práh
@@ -190,7 +191,7 @@ def build_season_view(model, enricher, my_scores: dict[int, float],
             new_titles.append(_make_rec(model, en, ptw, airing.get(mid), note))
 
     # pokračování: podle mé známky předchozí řady, pak taste_fit
-    sequels.sort(key=lambda r: (-getattr(r, "_prequel_score", 0), -r.taste_fit))
+    sequels.sort(key=lambda r: (-r.prequel_score, -r.taste_fit))
     # nové: čistě podle taste_fit (obsahová shoda), ořez na top N
     new_titles.sort(key=lambda r: -r.taste_fit)
     return sequels, new_titles[: rc.season_top_new]

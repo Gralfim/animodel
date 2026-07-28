@@ -192,6 +192,7 @@ def load_lexicon(path: str | Path) -> dict[str, float] | None:
     import yaml
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     out: dict[str, float] = {}
+    source_of: dict[str, str] = {}      # kanonický klíč → řádek, který ho zapsal
     for key, value in raw.items():
         ck = _k(str(key))
         if not ck:
@@ -206,7 +207,24 @@ def load_lexicon(path: str | Path) -> dict[str, float] | None:
             log.warning(f"intensity lexikon {p}: '{key}' = {v} mimo rozsah "
                         f"[-1, 1] -- ořezávám")
             v = max(-1.0, min(1.0, v))
+        if ck in out and out[ck] != v:
+            # Dva RŮZNÉ řádky souboru spadly na tentýž kanonický klíč -- typicky
+            # když se do ALIAS přidá nové mapování a v souboru zůstanou obě
+            # varianty (`video_game` + `video_games`). Bez tohohle by tiše
+            # vyhrál ten pozdější v souboru, což umí přepsat ohodnocenou
+            # hodnotu nulou. Nula = "neohodnoceno", takže skutečná hodnota má
+            # přednost; při dvou různých nenulových vyhrává první a hlásí se.
+            prev = out[ck]
+            keep, drop = (prev, v) if (prev and not v) else \
+                         (v, prev) if (v and not prev) else (prev, v)
+            log.warning(
+                f"intensity lexikon {p}: '{source_of.get(ck, ck)}' a '{key}' "
+                f"jsou po kanonizaci týž klíč '{ck}' ({prev} vs {v}) -- "
+                f"používám {keep}, sjednoť je v souboru")
+            out[ck] = keep
+            continue
         out[ck] = v
+        source_of[ck] = str(key)
     return out
 
 

@@ -225,3 +225,42 @@ def test_unrated_intensity_attrs_reports_observed_keys_missing_from_lexicon():
 
     out = m.unrated_intensity_attrs()
     assert out == [("novy_tag", "Novy Tag", 7.0)]
+
+
+# ── kolize po přidání nového ALIAS mapování ──────────────────────────────
+
+def test_load_lexicon_warns_when_two_keys_canonize_to_one(tmp_path, caplog):
+    """Když se do ALIAS přidá nové mapování a v souboru zůstanou obě
+    varianty, spadnou na tentýž kanonický klíč. Bez ošetření by tiše vyhrál
+    ten pozdější v souboru -- a nula ("neohodnoceno") by přepsala skutečnou
+    hodnotu."""
+    f = tmp_path / "i.yaml"
+    f.write_text("video_game: -0.4\nvideo_games: 0\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        lex = load_lexicon(f)
+    assert lex["video_game"] == -0.4          # nenulová hodnota vyhrává
+    assert "týž klíč" in caplog.text
+
+
+def test_load_lexicon_zero_does_not_beat_value_regardless_of_order(tmp_path):
+    a = tmp_path / "a.yaml"
+    a.write_text("video_games: 0\nvideo_game: -0.4\n", encoding="utf-8")
+    b = tmp_path / "b.yaml"
+    b.write_text("video_game: -0.4\nvideo_games: 0\n", encoding="utf-8")
+    assert load_lexicon(a)["video_game"] == load_lexicon(b)["video_game"] == -0.4
+
+
+def test_load_lexicon_identical_duplicates_are_silent(tmp_path, caplog):
+    f = tmp_path / "i.yaml"
+    f.write_text("video_game: -0.1\nvideo_games: -0.1\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_lexicon(f)["video_game"] == -0.1
+    assert "týž klíč" not in caplog.text
+
+
+def test_alias_unifies_mal_and_anilist_naming():
+    """Nálezy z --analyze-attrs: týž koncept, jiné názvosloví zdrojů."""
+    from animodel.attributes import canon, resolve_alias
+    assert resolve_alias(canon("Video Games")) == resolve_alias(canon("Video Game"))
+    assert (resolve_alias(canon("Anthropomorphism"))
+            == resolve_alias(canon("Anthropomorphic")))

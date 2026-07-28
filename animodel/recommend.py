@@ -73,6 +73,35 @@ class Recommendation:
     broadcast: str | None = None      # den vysílání (např. "Mondays")
     airing_status: str | None = None  # RELEASING / FINISHED / NOT_YET_RELEASED
     season_note: str | None = None    # např. "pokračování: X (tvá známka 9)"
+    prequel_score: float = 0.0        # má známka předchozí řady (řazení sekce
+                                      # „pokračování tvých sérií"). Dřív se to
+                                      # na dataclass přišpendlovalo dynamicky
+                                      # (`rec._prequel_score = …`) a četlo přes
+                                      # getattr -- fungovalo, ale rozbilo by se
+                                      # tiše při `slots=True` (HODNOCENI §2).
+
+
+@dataclass
+class RecommendResult:
+    """
+    Výstup jednoho běhu doporučování.
+
+    Dřív se vracel jen `list[Recommendation]` a CF část se předávala privátními
+    atributy (`rec._cf_raw_results`, `rec._cf_senpai`), které si volající tahal
+    přes `getattr(..., [])`. Byl to implicitní kontrakt mezi dvěma moduly:
+    přejmenování atributu by nic nerozbilo, jen by tiše zmizel CF report
+    (HODNOCENI_PROJEKTU.md §2).
+    """
+    recs: list                      # seřazené Recommendation
+    senpai: list = field(default_factory=list)      # usercf.Senpai, pro CF report
+    cf_raw: list = field(default_factory=list)      # syrové CF dicty, pro CF report
+
+    def __iter__(self):
+        """Pohodlí volajícího: `for r in result` iteruje doporučení."""
+        return iter(self.recs)
+
+    def __len__(self):
+        return len(self.recs)
 
 
 def _z(values: list[float]) -> dict:
@@ -253,9 +282,10 @@ class Recommender:
                 for m in matches:
                     bump(m["mal_id"], 0.0, None, "tag-search")
 
-        # B) user-based CF (volitelné)
-        self._cf_raw_results = []  # reset před každým spuštěním
-        self._cf_senpai = []
+        # B) user-based CF (volitelné). Výsledky si nese `self._cf` jen po dobu
+        # jednoho běhu `recommend()`, který je hned zabalí do RecommendResult --
+        # ven z třídy se privátní stav nedostane.
+        self._cf = ([], [])       # (senpai, syrové CF dicty)
         if self.rc.use_user_cf and self.enr.anilist:
             self._user_cf(titles, seen_ids, bump)
 
@@ -276,8 +306,7 @@ class Recommender:
             senpai, recs = find_senpai_recommendations(
                 self.enr.anilist, user_scores, watched_ids=seen_ids, rc=self.rc,
             )
-            self._cf_senpai = senpai         # pro CF HTML report
-            self._cf_raw_results = recs      # uloženo pro CF HTML report
+            self._cf = (senpai, recs)        # pro CF HTML report
             for r in recs:
                 bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
             status(f"  user-CF: {len(senpai)} senpai, {len(recs)} kandidátů přidáno")
@@ -347,9 +376,11 @@ class Recommender:
 
     def recommend(self, all_titles: list[Title], ptw_ids: set[int],
                   watched_ids: set[int], show_progress=True,
-                  limit: int | None = -1) -> list[Recommendation]:
+                  limit: int | None = -1) -> RecommendResult:
         """
-        Vrátí seřazený list Recommendation.
+        Vrátí `RecommendResult`: seřazená doporučení + (volitelně) senpai a
+        syrové CF výsledky pro CF report. Iterovat/měřit délku jde přímo přes
+        výsledek, seznam je v `.recs`.
 
         limit=-1  → ořízni na self.rc.top_n (výchozí chování, globální přehled)
         limit=None → vrať celý ohodnocený pool (pro per-klastr pohled)
@@ -357,8 +388,9 @@ class Recommender:
         """
         # 1) kandidáti (vše co jsem viděl je "seen"; PTW NEvylučujeme)
         cand_meta = self._gather_candidates(all_titles, seen_ids=watched_ids)
+        senpai, cf_raw = getattr(self, "_cf", ([], []))
         if not cand_meta:
-            return []
+            return RecommendResult(recs=[], senpai=senpai, cf_raw=cf_raw)
 
         # 2) obohať kandidáty (atributy + komunitní skóre + synopse)
         cand_ids = list(cand_meta.keys())
@@ -383,7 +415,7 @@ class Recommender:
             rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname))
 
         if not rows:
-            return []
+            return RecommendResult(recs=[], senpai=senpai, cf_raw=cf_raw)
 
         # 4) z-skóry pro kompozit -- item-CF přes log1p (šikmé rozdělení:
         # kandidát doporučený mnoha seedy najednou by jinak dostal z-skóre
@@ -411,4 +443,5 @@ class Recommender:
 
         recs.sort(key=lambda r: -r.composite)
         top = self.rc.top_n if limit == -1 else limit
-        return recs if top is None else recs[:top]
+        return RecommendResult(recs=recs if top is None else recs[:top],
+                               senpai=senpai, cf_raw=cf_raw)

@@ -113,3 +113,45 @@ def test_cached_fetch_transient_failure_retries_on_next_call(tmp_path):
     cached_fetch(cache, "x", fetch)
     assert calls == [1, 1]
     assert cache.has("x") is False
+
+
+# ── rozvržení cache: každý klient má vlastní podsložku (§9.8) ────────────
+
+def test_each_client_uses_its_own_subdirectory(tmp_path):
+    """Všichni tři klienti berou KOŘEN cache a podsložku si doplní sami.
+    Dřív psal MAL klient rovnou do kořene (~10 tis. souborů vedle podsložek
+    ostatních zdrojů) a Shikimori jako jediný očekával už hotovou cestu."""
+    from animodel.sources.anilist import AniListClient
+    from animodel.sources.jikan import JikanClient
+    from animodel.sources.shikimori import ShikimoriClient
+
+    root = str(tmp_path)
+    assert JikanClient(root)._cache.root == tmp_path / "mal"
+    assert ShikimoriClient(root)._cache.root == tmp_path / "shikimori"
+    al = AniListClient(root)
+    assert al._cache.root == tmp_path / "anilist"
+    assert al._cf_cache.root == tmp_path / "cf_al"
+
+
+def test_cache_root_holds_no_loose_files(tmp_path):
+    """Kořen cache má obsahovat jen podsložky -- díky tomu jde invalidovat
+    jeden zdroj přes `rm -r`, ne globem."""
+    from animodel.sources.jikan import JikanClient
+
+    client = JikanClient(str(tmp_path))
+    client._cache.set("anime/1/full", {"found": True, "data": {"x": 1}})
+    assert [p.name for p in tmp_path.iterdir()] == ["mal"]
+    assert client._cache.get("anime/1/full")["data"] == {"x": 1}
+
+
+def test_enricher_gives_all_clients_the_same_root(tmp_path):
+    from animodel.config import Config
+    from animodel.enrich import Enricher
+
+    cfg = Config()
+    cfg.cache_dir = str(tmp_path)
+    cfg.enrich.use_shikimori = True
+    enr = Enricher(cfg)
+    assert enr.jikan._cache.root == tmp_path / "mal"
+    assert enr.anilist._cache.root == tmp_path / "anilist"
+    assert enr.shikimori._cache.root == tmp_path / "shikimori"

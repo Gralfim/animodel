@@ -41,7 +41,12 @@ RETRY_DELAYS = [2, 5, 10, 30]  # exponenciální backoff; 429 = len()+1 pokusů,
 class JikanClient:
     def __init__(self, cache_dir: str = "cache", sleep: Callable[[float], None] = time.sleep,
                  base_url: str = BASE_URL):
-        self._cache = FileCache(Path(cache_dir))
+        # `cache_dir` je KOŘEN cache; podsložku si klient doplní sám -- stejně
+        # jako AniList (anilist/, cf_al/) a Shikimori (shikimori/). Dřív psal
+        # MAL data rovnou do kořene, takže tam leželo ~10 tis. souborů vedle
+        # podsložek ostatních zdrojů a selektivní invalidace znamenala glob
+        # místo `rm -r` (HODNOCENI_PROJEKTU.md §2).
+        self._cache = FileCache(Path(cache_dir) / "mal")
         self._rate_limiter = FixedRateLimiter(REQUEST_DELAY)
         self._sleep = sleep
         self.base_url = base_url.rstrip("/")

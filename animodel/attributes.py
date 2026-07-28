@@ -51,6 +51,11 @@ ALIAS: dict[str, str] = {
     "reverse_harem": "reverse_harem",
     "primarily_female_cast": "primarily_female_cast",
     "ensemble_cast": "ensemble_cast",
+    # Nalezeno přes --analyze-attrs (2026-07-26): MAL a AniList pojmenovávají
+    # týž koncept jinak, takže se evidence dělila na dvě poloviny a obě se
+    # silněji smršťovaly k nule.
+    "video_games": "video_game",            # MAL "Video Game" ↔ AniList "Video Games"
+    "anthropomorphism": "anthropomorphic",  # MAL "Anthropomorphic" ↔ AniList tag
 }
 
 # Kategorie, ve kterých se může objevit tentýž koncept z více zdrojů.
@@ -226,6 +231,117 @@ def build_attributes(
                 _add(out, f"Writer: {name}", "writer", 1.0)
                 seen_writers.add(name)
 
+    return out
+
+
+# ── Diagnostika kanonizace ──────────────────────────────────────────────────
+
+def _edit_distance_within(a: str, b: str, limit: int) -> int | None:
+    """
+    Levenshteinova vzdálenost, ale jen dokud nepřeleze `limit` (pak `None`).
+
+    Předčasné ukončení je tu kvůli rychlosti: diagnostika porovnává stovky
+    klíčů každý s každým a plný výpočet by u drtivé většiny dvojic byl
+    zbytečný -- ty se liší po prvních pár znacích.
+    """
+    if abs(len(a) - len(b)) > limit:
+        return None
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (ca != cb))
+        if min(cur) > limit:
+            return None
+        prev = cur
+    return prev[-1] if prev[-1] <= limit else None
+
+
+def _stem(token: str) -> str:
+    """Hrubý stemmer na množné číslo (`games` → `game`). Nechává krátká
+    slova a `-ss` být (`class`, `boss`)."""
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        n += 1
+    return n
+
+
+def find_near_duplicate_keys(keys, *, max_distance: int = 2, min_len: int = 6,
+                             prefix_ratio: float = 0.7) -> list[tuple]:
+    """
+    Najde dvojice kanonických klíčů, které vypadají jako TÝŽ koncept zapsaný
+    dvakrát, a přitom je `ALIAS` nespojuje.
+
+    Proč to chce vlastní nástroj: tichý selhací mód `attributes.py` je právě
+    „dva klíče pro jeden koncept". Nikde nespadne, jen se evidence rozdělí na
+    dvě poloviny, obě se silněji smrští k nule a efekt zmizí -- tedy přesně
+    to, čemu má modul zabránit. Z běžného výstupu to poznat nejde.
+
+    Dvě kritéria (stačí jedno):
+
+    1. **Shodná slova** po hrubém stemmingu množného čísla, nezávisle na
+       pořadí: `video_game` ↔ `video_games`, `police_female` ↔ `female_police`.
+    2. **Jednoslovné klíče lišící se jen koncovkou**: editační vzdálenost
+       ≤ `max_distance` A společný prefix aspoň `prefix_ratio` délky kratšího
+       z nich -- `anthropomorphic` ↔ `anthropomorphism` (prefix 93 %).
+
+    Proč tak přísně: první verze porovnávala celé klíče znakovým
+    Levenshteinem a na reálných datech dala **19 dvojic, z toho 2 skutečné**.
+    Znaková vzdálenost totiž nerozliší „jiný token" od „jiná koncovka":
+    `female_protagonist` ↔ `male_protagonist` je vzdálenost 2 stejně jako
+    `video_game` ↔ `video_games`, přestože první dvojice jsou dva různé
+    koncepty a druhá jeden. Porovnání po slovech to odděluje: liší-li se
+    klíče v celém slově, jde o různé koncepty; liší-li se jen koncovkou
+    téhož slova, jde o tvarovou variantu. Prefixová podmínka pak vyřadí
+    zbytek náhodných shod (`acting`/`action` mají prefix jen 67 %).
+
+    `min_len` drží krátké klíče mimo -- u tří-čtyřznakových je vzdálenost 2
+    skoro náhoda (`war`/`wax`).
+
+    `keys` = iterovatelné kanonických klíčů. Vrací
+    `[(klíč_a, klíč_b, důvod, vzdálenost), ...]`, deterministicky seřazené.
+    """
+    uniq = sorted({k for k in keys if k})
+    out: list[tuple] = []
+    seen_pairs: set[tuple] = set()
+
+    def add(a, b, why, dist):
+        pair = (a, b) if a < b else (b, a)
+        if pair in seen_pairs or resolve_alias(a) == resolve_alias(b):
+            return          # ALIAS je řešení, ne nález
+        seen_pairs.add(pair)
+        out.append((pair[0], pair[1], why, dist))
+
+    # 1) shodná slova (po stemmingu), nezávisle na pořadí -- O(n) přes podpis
+    by_tokens: dict[tuple, list[str]] = {}
+    for k in uniq:
+        sig = tuple(sorted(_stem(t) for t in k.split("_")))
+        by_tokens.setdefault(sig, []).append(k)
+    for group in by_tokens.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                add(group[i], group[j], "shodná slova (tvar/pořadí)", 0)
+
+    # 2) jednoslovné klíče lišící se jen koncovkou
+    singles = [k for k in uniq if "_" not in k and len(k) >= min_len]
+    for i, a in enumerate(singles):
+        for b in singles[i + 1:]:
+            d = _edit_distance_within(a, b, max_distance)
+            if not d:
+                continue
+            if _common_prefix_len(a, b) >= prefix_ratio * min(len(a), len(b)):
+                add(a, b, f"stejný kmen, jiná koncovka (vzdálenost {d})", d)
+
+    out.sort(key=lambda x: (x[3], x[0], x[1]))
     return out
 
 
