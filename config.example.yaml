@@ -34,8 +34,16 @@ enrich:
   use_anilist: true
   anilist_min_rank: 30      # ignoruj okrajové AniList tagy (rank < 30 %)
   include_studios: true
-  include_staff: false      # signál po režisérech/scenáristech (nové) — stojí
-                            # navíc 1 Jikan volání na titul (/staff endpoint)
+  include_staff: false      # signál po režisérech/scenáristech
+  staff_source: jikan       # odkud staff brát: "jikan" | "anilist"
+                            #   jikan   +1 request NA TITUL, ale hlubší kredity
+                            #   anilist 0 requestů navíc (jede v téže dávce po 50),
+                            #           zato mělčí — na živém seznamu 20 staff
+                            #           efektů proti 24 u Jikanu
+                            # Vyplatí se přepnout na anilist při STUDENÉ cache
+                            # (staff zdarma) nebo v --no-jikan režimu, kde je
+                            # stejně jediný. Zdroje se nikdy nemíchají — každý
+                            # píše jména jinak a tentýž člověk by dostal dva klíče.
   use_shikimori: false      # další nezávislý zdroj "podobných anime" kandidátů
                             # (viz sources/shikimori.py). Tvar odpovědi ověřen
                             # (prostý seznam bez skóre podobnosti → váží se

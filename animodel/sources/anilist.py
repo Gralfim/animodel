@@ -41,6 +41,17 @@ NO_PROGRESS_PAGE_LIMIT = 5            # kolik stránek bez nového uživatele
 # dotaz nemohou rozjet. Pole genres/description/seasonYear/startDate/relations
 # přidána kvůli nouzovému AniList-only režimu (--no-jikan): pokrývají to, co
 # jinak dodává Jikan (žánry, synopse, dekáda, franšízové vazby).
+#
+# `staff` je tu od 2026-08: role, které AniList vrací ("Director", "Series
+# Composition", "Original Creator"), sedí doslova na attributes.py sady
+# DIRECTOR_POSITIONS/WRITER_POSITIONS. Dřív se staff tahal z Jikanu
+# samostatným /anime/{id}/staff endpointem, tedy +1 request NA TITUL (u ~460
+# titulů to je ~460 requestů navíc při studené cache). Tady přijde v téže
+# dávce po 50 zadarmo -- změřeno: dotaz s ním trvá 1,50 s proti 1,49 s bez
+# něj a je o 21 kB větší, žádná chyba složitosti.
+#
+# `countryOfOrigin` je jediné nové *modelovací* pole: JP/CN/KR rozlišuje
+# donghua a korejskou tvorbu, o kterých model dosud nevěděl vůbec nic.
 _MEDIA_FIELDS = """
       id
       idMal
@@ -49,6 +60,7 @@ _MEDIA_FIELDS = """
       description
       seasonYear
       startDate { year }
+      countryOfOrigin
       tags {
         name
         rank
@@ -59,6 +71,9 @@ _MEDIA_FIELDS = """
       }
       studios {
         nodes { name isAnimationStudio }
+      }
+      staff(sort: RELEVANCE, perPage: 10) {
+        edges { role node { name { full } } }
       }
       relations {
         edges {
@@ -168,13 +183,19 @@ class AniListClient:
 
     @staticmethod
     def _media_key(mal_id: int) -> str:
-        """Cache klíč pro Media data. Přípona _v2 = verze schématu dotazu:
+        """Cache klíč pro Media data; přípona = verze schématu dotazu.
+
         v2 přidala genres/description/seasonYear/startDate/relations (nouzový
-        AniList-only režim). Starší mal_{id}.json soubory tahle pole nemají
-        a chybějící pole nejde rozlišit od "titul je nemá" -- proto nový
-        klíč. Staré soubory neškodně osiří; re-fetch celého seznamu jde přes
-        batch (50 titulů/request), takže stojí ~10 requestů, ne stovky."""
-        return f"mal_{mal_id}_v2"
+        AniList-only režim), **v3 pak staff + countryOfOrigin**.
+
+        Verze se bumpuje proto, že chybějící pole nejde odlišit od „titul ho
+        nemá". U countryOfOrigin by to bylo přímo škodlivé: staré záznamy by
+        atribut země neměly, nové ano, a model by dostal signál korelovaný
+        se stářím cache, ne s obsahem.
+
+        Staré soubory neškodně osiří (smaž je, viz README) a re-fetch jde přes
+        batch po 50, takže stojí ~10 requestů na seznam, ne stovky."""
+        return f"mal_{mal_id}_v3"
 
     def _cached_media(self, mal_id: int) -> dict | None:
         """Poslední cachovaná AniList Media data pro `mal_id`, BEZ síťového

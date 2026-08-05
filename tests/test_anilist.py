@@ -57,10 +57,12 @@ def test_get_anime_success_is_cached(tmp_path, no_sleep):
     assert post.calls == 1
     assert client.get_anime(1) == media   # z cache
     assert post.calls == 1
-    # cache klíč nese verzi schématu dotazu (v2 = genres/description/
-    # seasonYear/relations) -- starý mal_{id} bez verze se už nepoužívá,
-    # jinak by staré soubory bez nových polí vypadaly jako platná data
-    assert client._cache.has("mal_1_v2")
+    # Cache klíč nese verzi schématu dotazu (v2 = genres/description/
+    # seasonYear/relations, v3 = staff + countryOfOrigin). Starší klíče se
+    # nepoužívají -- soubory bez nových polí by vypadaly jako platná data a
+    # chybějící pole nejde odlišit od "titul ho nemá".
+    assert client._cache.has("mal_1_v3")
+    assert not client._cache.has("mal_1_v2")
     assert not client._cache.has("mal_1")
 
 

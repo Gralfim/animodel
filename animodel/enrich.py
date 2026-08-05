@@ -55,6 +55,31 @@ def _relations_from_anilist(media: dict | None) -> dict | None:
     return {"relations": rels} if rels else None
 
 
+def _staff_from_anilist(media: dict | None) -> list[dict]:
+    """
+    Adaptér: AniList `staff.edges` → Jikan tvar `[{"person": {"name": …},
+    "positions": [role]}, …]`, aby `attributes.build_attributes` zůstalo
+    beze změny a nemuselo znát dva tvary.
+
+    Proč vůbec: role, které AniList vrací ("Director", "Series Composition",
+    "Original Creator"), jsou doslova ty, na které se ptají
+    DIRECTOR_POSITIONS/WRITER_POSITIONS. Jikan je uměl taky, ale za cenu
+    samostatného /anime/{id}/staff requestu NA KAŽDÝ TITUL; AniList je má
+    v téže dávce po 50, kterou stahujeme tak jako tak.
+
+    Rozdíl tvarů: Jikan má na osobu SEZNAM pozic, AniList jednu roli na
+    hranu (tatáž osoba se může objevit víckrát) -- proto `[role]`.
+    """
+    edges = ((media or {}).get("staff") or {}).get("edges") or []
+    out = []
+    for edge in edges:
+        name = (((edge.get("node") or {}).get("name") or {}).get("full") or "").strip()
+        role = (edge.get("role") or "").strip()
+        if name and role:
+            out.append({"person": {"name": name}, "positions": [role]})
+    return out
+
+
 # Formáty, které v rámci franšízy značí vedlejší obsah (OVA/speciály/hudební
 # klipy). ONA záměrně chybí -- plnohodnotné série dnes běžně vycházejí jako
 # ONA (streamovací platformy), není to signál vedlejšosti. Movie taky ne
@@ -138,9 +163,31 @@ class Enricher:
         adata = {}
         if self.anilist:
             adata = self.anilist.get_anime_batch(mal_ids, show_progress=show_progress)
+        # Staff: JEDEN zdroj na běh (`enrich.staff_source`), nikdy se nemíchají.
+        #
+        # Míchat per titul (AniList, kde je, jinak Jikan) by bylo lákavé --
+        # vypadá to jako "nejlepší z obou" -- ale je to CHYBA. Každý zdroj
+        # píše jména jinak ("Mizushima, Tsutomu" vs. "Tsutomu Mizushima"):
+        # ze ~159 jmen se doslovně shodovalo 9. Tentýž člověk by tak dostal
+        # dva klíče podle toho, který zdroj titul pokryl, a evidence o něm by
+        # se rozdělila na poloviny -- přesně ten tichý selhací mód, který
+        # hlídá --analyze-attrs. `person_key` sice formát jmen sjednotí, ale
+        # zdroje se liší i věcně (pseudonymy: Hatakeyama Mamoru = Omata
+        # Shinichi, jiná hloubka kreditů), takže konzistenci drží až pravidlo
+        # "jeden zdroj na běh".
+        #
+        # AniList je vynucený v --no-jikan režimu, kde je jediný dostupný.
         sdata = {}
-        if self.cfg.enrich.include_staff and self.jikan:
-            sdata = self.jikan.get_staff_batch(mal_ids, show_progress=show_progress)
+        if self.cfg.enrich.include_staff:
+            want_anilist = self.cfg.enrich.staff_source == "anilist" or not self.jikan
+            if want_anilist and self.anilist:
+                # Přišlo už v dávce výš -> 0 requestů navíc.
+                sdata = {mid: st for mid, a in adata.items()
+                         if (st := _staff_from_anilist(a))}
+            elif self.jikan:
+                # +1 request na titul, ale hlubší kredity (viz staff_source).
+                sdata = self.jikan.get_staff_batch(mal_ids,
+                                                   show_progress=show_progress)
 
         out = {}
         for mid in mal_ids:

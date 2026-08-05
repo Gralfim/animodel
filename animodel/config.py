@@ -54,10 +54,22 @@ class EnrichCfg:
     use_anilist: bool = True
     anilist_min_rank: int = 30        # ignoruj okrajové AniList tagy (rank < 30 %)
     include_studios: bool = True
-    include_staff: bool = False       # signál po režisérech/scenáristech; navíc
-                                       # 1 Jikan volání na titul (/staff endpoint),
-                                       # proto default vypnuto -- zapni, když chceš
-                                       # cenu za první běh a mít to napojené
+    include_staff: bool = False       # signál po režisérech/scenáristech; cena
+                                       # závisí na staff_source níž, proto default
+                                       # vypnuto -- zapni, když to chceš napojené
+    staff_source: str = "jikan"       # "jikan" | "anilist" -- ODKUD brát staff.
+        # Změřeno na reálném seznamu (458 titulů, práh min_attr_count=4):
+        #
+        #   jikan   +1 request NA TITUL (/anime/{id}/staff), ale hlubší data:
+        #           571 osob, 121 atributů projde prahem (31 režisérů, 90 scenáristů)
+        #   anilist 0 requestů navíc (přijde v téže dávce po 50), ale mělčí:
+        #           464 osob, 94 atributů projde prahem (28 režisérů, 66 scenáristů)
+        #
+        # Default je jikan, protože kdo `include_staff` používá, má ta data
+        # dávno v cache -- tam už je requestová úspora nulová a zbyla by jen
+        # ztráta ~22 % signálu. `anilist` se vyplatí na STUDENÉ cache (94
+        # atributů zdarma vs. 121 za ~460 requestů) a v --no-jikan režimu,
+        # kde je jediná možnost. Zdroje se NIKDY nemíchají (viz enrich.py).
     use_shikimori: bool = False       # další nezávislý zdroj "podobných anime"
                                        # kandidátů (viz sources/shikimori.py) --
                                        # default vypnuto, není naživo ověřené

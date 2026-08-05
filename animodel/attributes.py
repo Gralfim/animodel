@@ -61,9 +61,20 @@ ALIAS: dict[str, str] = {
 # Kategorie, ve kterých se může objevit tentýž koncept z více zdrojů.
 # Pořadí priority při slučování (dřívější vyhraje při kolizi labelu).
 CATEGORY_PRIORITY = [
-    "genre", "demographic", "source", "format", "decade",
+    "genre", "demographic", "source", "format", "decade", "origin",
     "theme", "tag", "studio", "director", "writer",
 ]
+
+# AniList countryOfOrigin → zobrazovací label. Japonsko SCHVÁLNĚ chybí: tvoří
+# ~95 % každého seznamu, takže jako atribut by byl prakticky konstanta --
+# efekt by vyšel ~0 a jen by zabíral místo v interakcích. Informace je právě
+# v tom, když titul japonský NENÍ (donghua, korejská tvorba), a přesně tak se
+# přidává (viz build_attributes).
+_ORIGIN_LABELS = {
+    "CN": "Čínský původ",
+    "KR": "Korejský původ",
+    "TW": "Tchajwanský původ",
+}
 
 # Kanonizace staff pozic patří sem, k ostatní logice atributů, ne do API
 # klienta (dřív to bylo duplikované i v jikan.py::list_all_staff -- ta
@@ -98,10 +109,35 @@ class AttrValue:
                            # dá skrýt přepínačem (viz report.py)
 
 
+def person_key(name: str) -> str:
+    """
+    Klíč osoby nezávislý na tom, který zdroj jméno dodal.
+
+    Jikan píše „Mizushima, Tsutomu", AniList „Tsutomu Mizushima" -- tentýž
+    člověk, dva různé řetězce. Změřeno na vzorku: ze ~159 jmen se doslovně
+    shodovalo **9**, po seřazení slov **100**. Bez tohohle by přepnutí zdroje
+    (nebo míchání zdrojů) rozdělilo evidence o témž režisérovi na dva klíče --
+    přesně ten tichý selhací mód, který hlídá `--analyze-attrs`.
+
+    Řadí slova abecedně, takže na pořadí příjmení/jméno nezáleží. Zůstávají
+    rozdíly, které to spravit neumí (romanizace Ohkawa/Ookawa, pseudonymy) --
+    ty jsou skutečné rozdíly dat, ne formátu.
+    """
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    parts = sorted(p for p in re.split(r"[^a-zA-Z0-9]+", ascii_name.lower()) if p)
+    return "_".join(parts)
+
+
 def _add(out: dict[str, AttrValue], raw_name: str, category: str, weight: float,
-         spoiler: bool = False):
-    """Přidá atribut; při kolizi klíče ponechá vyšší váhu a kategorii dle priority."""
-    key = resolve_alias(canon(raw_name))
+         spoiler: bool = False, key: str | None = None):
+    """
+    Přidá atribut; při kolizi klíče ponechá vyšší váhu a kategorii dle priority.
+
+    `key` dovoluje klíč odvodit jinak než z `raw_name` -- používá to staff,
+    kde má být klíč nezávislý na formátu jména (viz person_key), ale popisek
+    má zůstat čitelný tak, jak ho dodal zdroj.
+    """
+    key = key or resolve_alias(canon(raw_name))
     if not key:
         return
     label = raw_name.strip()
@@ -209,6 +245,12 @@ def build_attributes(
             ayear = anilist.get("seasonYear") or (anilist.get("startDate") or {}).get("year")
             if ayear:
                 _add(out, f"{(int(ayear)//10)*10}s", "decade", 1.0)
+        # Země původu jen když NENÍ japonská -- viz _ORIGIN_LABELS. Model o
+        # donghua/korejské tvorbě dosud nevěděl nic, přestože se stylisticky
+        # i produkčně liší; jako atribut to konečně může nést vlastní efekt.
+        origin = _ORIGIN_LABELS.get((anilist.get("countryOfOrigin") or "").upper())
+        if origin:
+            _add(out, origin, "origin", 1.0)
 
     # ── Staff (režie / scénář) ─────────────────────────────────────
     # Samostatná kategorie na osobu+roli (ne jen na osobu), protože dobrý
@@ -224,12 +266,20 @@ def build_attributes(
             if not name:
                 continue
             positions = {p.lower() for p in (entry.get("positions") or [])}
-            if positions & DIRECTOR_POSITIONS and name not in seen_directors:
-                _add(out, f"Director: {name}", "director", 1.0)
-                seen_directors.add(name)
-            if positions & WRITER_POSITIONS and name not in seen_writers:
-                _add(out, f"Writer: {name}", "writer", 1.0)
-                seen_writers.add(name)
+            # Klíč z person_key (nezávislý na formátu jména napříč zdroji),
+            # popisek ale zůstává tak, jak ho dodal zdroj -- v reportu má být
+            # čitelné jméno, ne abecedně přeházené.
+            pkey = person_key(name)
+            if not pkey:
+                continue
+            if positions & DIRECTOR_POSITIONS and pkey not in seen_directors:
+                _add(out, f"Director: {name}", "director", 1.0,
+                     key=f"director_{pkey}")
+                seen_directors.add(pkey)
+            if positions & WRITER_POSITIONS and pkey not in seen_writers:
+                _add(out, f"Writer: {name}", "writer", 1.0,
+                     key=f"writer_{pkey}")
+                seen_writers.add(pkey)
 
     return out
 

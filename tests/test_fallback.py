@@ -181,3 +181,118 @@ def test_gather_candidates_skips_mal_rec_without_jikan():
     # Nesmí spadnout na self.enr.jikan.get_recommendations (jikan je None);
     # bez zdrojů prostě nevrátí žádné kandidáty.
     assert rec._gather_candidates([seed], seen_ids=set()) == {}
+
+
+# ── staff: jeden zdroj na běh, klíč nezávislý na formátu jména ───────────
+
+def test_person_key_is_source_independent():
+    """Jikan píše "Mizushima, Tsutomu", AniList "Tsutomu Mizushima" -- tentýž
+    člověk. Ze ~159 jmen se doslovně shodovalo 9, po seřazení slov 100."""
+    from animodel.attributes import person_key
+    assert person_key("Mizushima, Tsutomu") == person_key("Tsutomu Mizushima")
+    assert person_key("Ōkawa, Nanase") == person_key("Nanase Okawa")
+    assert person_key("") == ""
+
+
+def test_staff_attribute_key_ignores_name_order_but_label_stays_readable():
+    from animodel.attributes import build_attributes
+
+    jikan_shape = [{"person": {"name": "Mizushima, Tsutomu"},
+                    "positions": ["Director"]}]
+    anilist_shape = [{"person": {"name": "Tsutomu Mizushima"},
+                      "positions": ["Director"]}]
+    a = build_attributes(None, None, staff=jikan_shape)
+    b = build_attributes(None, None, staff=anilist_shape)
+    assert set(a) == set(b), "klíč musí být stejný pro oba zdroje"
+    # popisek ale zůstává tak, jak ho zdroj dodal
+    assert list(a.values())[0].label == "Director: Mizushima, Tsutomu"
+    assert list(b.values())[0].label == "Director: Tsutomu Mizushima"
+
+
+def test_anilist_staff_adapter_maps_roles_to_jikan_shape():
+    from animodel.enrich import _staff_from_anilist
+
+    media = {"staff": {"edges": [
+        {"role": "Director", "node": {"name": {"full": "Shinichirou Watanabe"}}},
+        {"role": "Series Composition", "node": {"name": {"full": "Keiko Nobumoto"}}},
+        {"role": "", "node": {"name": {"full": "Bez role"}}},        # vynechá se
+    ]}}
+    out = _staff_from_anilist(media)
+    assert out == [
+        {"person": {"name": "Shinichirou Watanabe"}, "positions": ["Director"]},
+        {"person": {"name": "Keiko Nobumoto"}, "positions": ["Series Composition"]},
+    ]
+    assert _staff_from_anilist(None) == []
+    assert _staff_from_anilist({}) == []
+
+
+def test_staff_sources_are_never_mixed(tmp_path):
+    """Míchání per titul by tomutéž člověku dalo dva klíče podle toho, který
+    zdroj titul pokryl."""
+    from animodel.config import Config
+    from animodel.enrich import Enricher
+
+    class FakeJikan:
+        def __init__(self):
+            self.staff_calls = 0
+
+        def get_anime_batch(self, ids, show_progress=True):
+            return {i: {"title": f"T{i}"} for i in ids}
+
+        def get_staff_batch(self, ids, show_progress=True):
+            self.staff_calls += 1
+            return {i: [{"person": {"name": "Jikan Person"},
+                         "positions": ["Director"]}] for i in ids}
+
+    class FakeAniList:
+        def get_anime_batch(self, ids, show_progress=True):
+            # titul 2 staff NEMÁ -- při míchání by spadl na Jikan
+            return {1: {"idMal": 1, "staff": {"edges": [
+                        {"role": "Director",
+                         "node": {"name": {"full": "AniList Person"}}}]}},
+                    2: {"idMal": 2}}
+
+    cfg = Config()
+    cfg.cache_dir = str(tmp_path)
+    cfg.enrich.include_staff = True
+    cfg.enrich.staff_source = "anilist"
+    jik = FakeJikan()
+    enr = Enricher(cfg, jikan=jik, anilist=FakeAniList())
+    out = enr.enrich_ids([1, 2])
+
+    assert jik.staff_calls == 0, "s anilist zdrojem se Jikan /staff nesmí volat"
+    assert any(av.category == "director" for av in out[1].attrs.values())
+    assert not any(av.category == "director" for av in out[2].attrs.values())
+
+
+def test_staff_falls_back_to_anilist_without_jikan(tmp_path):
+    """--no-jikan režim: staff musí jít z AniListu, jinak by signál zmizel."""
+    from animodel.config import Config
+    from animodel.enrich import Enricher
+
+    class FakeAniList:
+        def get_anime_batch(self, ids, show_progress=True):
+            return {1: {"idMal": 1, "staff": {"edges": [
+                {"role": "Director", "node": {"name": {"full": "A B"}}}]}}}
+
+    cfg = Config()
+    cfg.cache_dir = str(tmp_path)
+    cfg.enrich.include_staff = True
+    cfg.enrich.staff_source = "jikan"      # i tak musí spadnout na AniList
+    cfg.enrich.use_jikan = False
+    enr = Enricher(cfg, jikan=None, anilist=FakeAniList())
+    out = enr.enrich_ids([1])
+    assert any(av.category == "director" for av in out[1].attrs.values())
+
+
+def test_country_of_origin_added_only_when_not_japanese():
+    """Japonsko tvoří ~95 % seznamu -- jako atribut by to byla konstanta
+    s nulovým efektem. Informace je v tom, když titul japonský NENÍ."""
+    from animodel.attributes import build_attributes
+
+    jp = build_attributes(None, {"countryOfOrigin": "JP"})
+    cn = build_attributes(None, {"countryOfOrigin": "CN"})
+    assert not [av for av in jp.values() if av.category == "origin"]
+    assert [av.label for av in cn.values() if av.category == "origin"] \
+        == ["Čínský původ"]
+    assert not build_attributes(None, {"countryOfOrigin": None})

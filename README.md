@@ -116,7 +116,11 @@ animodel proto **necílí na známku, ale na odchylku**:
 Žádný `config.yaml` plný seznamů žánrů. Atributy (žánry, témata, AniList tagy,
 studia, zdroj, dekáda, formát, demografie) se **objevují samy z dat**.
 `attributes.py` je kanonizuje a **dedupuje napříč zdroji** (MAL „Drama" a AniList
-tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát.
+tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát. Totéž
+platí pro osoby: klíč režiséra/scenáristy se skládá ze seřazených slov jména,
+takže „Mizushima, Tsutomu" (Jikan) a „Tsutomu Mizushima" (AniList) jsou jeden
+atribut. Země původu vstupuje jen když **není** japonská (JP tvoří ~95 %
+každého seznamu, jako atribut by to byla konstanta).
 
 Tichý selhací mód téhle vrstvy je „dva klíče pro jeden koncept": nikde to
 nespadne, jen se evidence rozdělí na dvě poloviny, obě se silněji smrští
@@ -288,7 +292,8 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `recommend.high_score` | od jaké známky je titul „seed" |
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |
 | `enrich.use_jikan` | vypni pro nouzový AniList-only režim (viz `--no-jikan`) |
-| `enrich.include_staff` | signál po režisérech/scenáristech (+1 Jikan volání/titul, default vypnuto) |
+| `enrich.include_staff` | signál po režisérech/scenáristech (default vypnuto) |
+| `enrich.staff_source` | `jikan` (+1 request/titul, hlubší) nebo `anilist` (zdarma v dávce, mělčí) |
 | `enrich.use_shikimori` | další zdroj „podobných anime" kandidátů (default vypnuto, +1 request/seed) |
 | `recommend.user_cf_report_top` | strop karet v `cf_recommendations.html` (0 = bez stropu) |
 | `recommend.use_user_cf` + `user_cf_*` | senpai pipeline (viz `--user-cf`): počet senpai, velikost poolu, min. plný překryv… |
@@ -399,6 +404,12 @@ cache/
 rm -r cache/mal        # jen MAL data, AniList i CF zůstanou
 ```
 
+> Verzované klíče: AniList Media je od 2026-08-05 na `_v3` (přibyl `staff`
+> a `countryOfOrigin`). Starší `mal_*_v2.json` se už nečtou — smaž je:
+> ```bash
+> find cache/anilist -name 'mal_*_v2.json' -delete
+> ```
+>
 > Pokud máš cache z verze před 2026-07-26, leží MAL data přímo v `cache/`.
 > Přesuň je jednou do `cache/mal/`, jinak se stáhnou znovu (u ~10 tis.
 > titulů jde o hodiny):

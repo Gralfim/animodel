@@ -24,7 +24,7 @@ a proč**.
 > **§9.1** variantou (c) (trojice mají vlastní kalibrovanou škálu, fold-modely
 > klastrují samy → do CV neprosakuje nic) a **§9.2** (vážený kosinus proti
 > plnému těžišti nálady). Detaily a naměřené dopady u jednotlivých nálezů.
-> Testů 165 → **250**, všechny zelené; defaultní cesta kalibrace ověřena jako
+> Testů 165 → **256**, všechny zelené; defaultní cesta kalibrace ověřena jako
 > bitově identická s HEAD. §9.3 **zamítnuta** (její premisa byla chybná —
 > viz §5.5), ale při jejím ověřování se našel a opravil vážnější bug: obsahová
 > discovery větev byla kvůli AND sémantice `tag_in` **mrtvá**. Otevřené
@@ -995,6 +995,75 @@ Původní poznámka: — sjednotí to s ostatními
 třemi klienty a udělá selektivní invalidaci `rm -r`-schopnou. Vyžaduje jednorázový
 přesun ~10 tis. souborů, jinak se cache znovu stáhne. Čistě kosmetika, spíš
 „až se to bude hodit".
+
+---
+
+## 9b. Revize zdrojů dat (2026-08-05)
+
+Kontrola po ~týdnu provozu: co se změnilo u používaných zdrojů a je-li venku
+něco nového, co by projektu pomohlo. Stav endpointů **změřen živě**, ne
+odvozen z dokumentace.
+
+| zdroj | stav | pozn. |
+|---|---|---|
+| **Tenrai** (default) | ✅ 200, 0,04–0,61 s | deklaruje 99,9 % uptime, pokrývá 95 % Jikan endpointů |
+| **Jikan** (fallback v configu) | ❌ **HTTP 504** | výpadek trvá |
+| **AniList** | ✅ 200, ~0,5 s | 90 req/min beze změn |
+| **Shikimori** | ✅ 200, 1,6 s | v1 REST funguje; jejich docs už doporučují GraphQL |
+
+Jikanův výpadek není náhoda: v issue trackeru běží od dubna do července 2026
+řada hlášení (#591, #594, #606 „Anime API is down", #608, #609, #610) **bez
+reakce údržby**. Zakomentovaný fallback v `config.example.yaml` je tedy
+dekorace; migrace na Tenrai byla správná.
+
+Další zjištění bez dopadu na kód: **`anime-offline-database` byla 4. 7. 2026
+archivována** (nejčastěji doporučovaný offline dataset, teď zmražený na ~40
+tis. záznamech). Z nových zdrojů nic nepřesvědčilo — **ids.moe/AnimeAPI**
+(mapování ID) by jen zpřesnilo dnešní zkratku „Shikimori ID ≈ MAL ID",
+**AniDB** by duplikoval AniList tagy za cenu registrace a přísných limitů,
+**Kitsu/Simkl** nabízí třetí komunitní skóre, které projekt vědomě neprůměruje.
+
+### Co z toho vzniklo v kódu
+
+**AniList umí dodat staff v téže dávce po 50** (role „Director", „Series
+Composition", „Original Creator" sedí doslova na `DIRECTOR_POSITIONS`/
+`WRITER_POSITIONS`). Přidáno do `_MEDIA_FIELDS` spolu s `countryOfOrigin`;
+cache klíč bumpnut na `_v3`.
+
+> **Původní doporučení („přesunout staff na AniList, ušetří ~460 requestů")
+> se při měření ukázalo jako polovičně chybné** a skončilo jako
+> konfigurovatelná volba, ne jako výměna defaultu:
+>
+> 1. **Míchat zdroje per titul by byla chyba.** Každý píše jména jinak —
+>    „Mizushima, Tsutomu" vs. „Tsutomu Mizushima". Ze ~159 jmen se doslovně
+>    shodovalo **9**. Tentýž člověk by dostal dva klíče podle toho, který
+>    zdroj titul pokryl, a evidence by se rozdělila na poloviny — přesně ten
+>    selhací mód, na který je `--analyze-attrs`. Řešeno dvakrát: nová
+>    `attributes.person_key()` (klíč ze seřazených slov jména, průnik po
+>    normalizaci **100** místo 9) **a** pravidlo „jeden zdroj na běh".
+> 2. **Úspora requestů je jednorázová a už je zaplacená.** Kdo `include_staff`
+>    používá, má staff dávno v cache (tady 5 130 souborů), takže by přechod
+>    nepřinesl nic a jen ubral data.
+> 3. **AniList je mělčí.** Změřeno na 458 titulech: 571 osob / 121 atributů
+>    nad prahem (Jikan) vs. 464 / 94 (AniList). V živém modelu je rozdíl
+>    menší, protože práh se aplikuje na *vážený* počet (franšízové váhy):
+>    **24 vs. 20 staff efektů**, CV RMSE 0,8996 vs. 0,9012. Zvětšení
+>    `perPage` z 10 na 25 pokrytí nezlepšilo (+1 titul za dvojnásobná data),
+>    takže nejde o useknutí, ale o chybějící data.
+>
+> Výsledek: `enrich.staff_source` = `jikan` (default, beze změny chování)
+> nebo `anilist`. AniList se vyplatí na **studené cache** (94 atributů zdarma
+> proti 121 za ~460 requestů) a v `--no-jikan` režimu, kde je jediný možný.
+
+**`countryOfOrigin`** přidán jako atribut kategorie `origin`, a to **jen když
+není japonský** — JP tvoří ~95 % seznamu, takže jako atribut by to byla
+konstanta s nulovým efektem. Na tomhle seznamu je dopad zatím **nulový**
+(446 JP, 1 KR, 11 neznámo), takže žádný efekt neprojde prahem; smysl to má do
+budoucna, kdyby přibyla donghua nebo korejská tvorba.
+
+**Nepřidáno:** `duration` (délka dílu). Zpřesnila by detekci vedlejšího obsahu,
+ale to je změna franšízových vah — vlastní téma s vlastním měřením, ne přílepek
+k revizi zdrojů. Až se pro to někdo rozhodne, bude to stát další bump cache.
 
 ---
 

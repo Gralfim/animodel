@@ -264,3 +264,26 @@ def test_alias_unifies_mal_and_anilist_naming():
     assert resolve_alias(canon("Video Games")) == resolve_alias(canon("Video Game"))
     assert (resolve_alias(canon("Anthropomorphism"))
             == resolve_alias(canon("Anthropomorphic")))
+
+
+def test_curated_covers_adult_flagged_tags_that_leak_into_the_model():
+    """AniList značí Incest/Inseki/Cheating v MediaTagCollection jako
+    isAdult, ale u konkrétních titulů je posílá jako neadult -- do modelu
+    tedy propadají, zatímco z universa (build_universe) vypadnou. Hodnotu
+    jim proto musí dát CURATED, jinak by je diagnostika hlásila napořád."""
+    for key in ("incest", "inseki", "cheating"):
+        assert CURATED.get(key), f"{key} nemá kurátorovanou hodnotu"
+        assert -1.0 <= CURATED[key] <= 1.0
+
+
+def test_generate_keeps_custom_keys_outside_universe(tmp_path):
+    """Tyhle tagy žijí v uživatelově souboru jako vlastní klíče mimo
+    universum -- regenerace je nesmí zahodit, jinak by se hodnota ztratila
+    při každém --gen-intensity."""
+    out = tmp_path / "i.yaml"
+    generate_lexicon(out, jikan=FakeJikan(), anilist=FakeAniList())
+    out.write_text(out.read_text(encoding="utf-8") + "\nincest: 0.2\n",
+                   encoding="utf-8")
+    stats = generate_lexicon(out, jikan=FakeJikan(), anilist=FakeAniList())
+    assert load_lexicon(out)["incest"] == 0.2
+    assert stats["custom_kept"] == 1

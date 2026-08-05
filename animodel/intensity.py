@@ -118,6 +118,17 @@ CURATED: dict[str, float] = {
     "erotica": -0.2,            # MAL explicit žánr; méně komediální než ecchi
     "love_status_quo": -0.2,    # vztah se záměrně NEposouvá = pohodlí
                                 # (opak love_triangle, které je +0.1)
+    # Tagy, které AniList v MediaTagCollection značí `isAdult`, ale U TITULŮ
+    # posílá jako neadult -- propadají proto do modelu, ale do universa se
+    # nedostanou (viz build_universe). Hodnoty tu jsou, aby je měl aspoň
+    # vestavěný default; v uživatelově intensity.yaml žijí jako vlastní klíče.
+    "incest": 0.2,              # pokrevní; tabu a napětí, u části titulů
+                                # ovšem jen ecchi trop (Yosuga no Sora vs.
+                                # To LOVE-Ru) -- proto mírně, ne silně
+    "inseki": 0.1,              # nevlastní/adoptovaní sourozenci: standardní
+                                # romcom komplikace, lehčí než pokrevní
+    "cheating": 0.4,            # nevěra -- nepříjemné a dramatické, mezi
+                                # love_triangle (+0.1) a melodrama (+0.5)
 
     # ── AniList tagy: těžká strana ──
     "tragedy": 0.9,
@@ -247,6 +258,18 @@ def build_universe(jikan=None, anilist=None) -> list[dict]:
     se naopak ZAHRNUJÍ: build_attributes je od 2026-07 pouští do modelu
     s příznakem (report je umí skrýt) a pro osu náročnosti jsou to
     nejsilnější signály vůbec (Tragedy, Tearjerker, ...).
+
+    POZOR na jednu nesrovnalost v datech AniListu (změřeno 2026-08-05):
+    `isAdult` v MediaTagCollection a `isAdult` u tagu KONKRÉTNÍHO titulu se
+    můžou lišit. `Incest`, `Inseki` a `Cheating` jsou v kolekci adult
+    (kategorie „Sexual Content"), ale u mainstreamových titulů je AniList
+    posílá jako neadult s kategorií „Theme-Romance" -- do modelu tedy
+    propadají, zatímco tady se vyloučí. Jsou to 3 tagy z 69 adult, takže
+    universum kvůli nim nerozšiřujeme (přibylo by 66 klíčů explicitních
+    fetiš tagů, které se nikdy nepozorují). Řeší se opačným směrem: hodnotu
+    jim dává CURATED a v uživatelově souboru přežívají jako „vlastní klíče
+    mimo universum", které regenerace zachovává. Nový takový tag ohlásí
+    `unrated_intensity_attrs()`.
     """
     universe: list[dict] = []
     seen: set[str] = set()
