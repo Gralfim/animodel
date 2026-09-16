@@ -116,6 +116,24 @@ def _is_side_content(e: "Enriched") -> bool:
     return False
 
 
+def premiere_date(e: "Enriched") -> str | None:
+    """
+    Datum premiéry (ISO) z Jikan `aired.from`, fallback AniList `startDate`.
+
+    Používá to časová validace (backtest.py): tituly BEZ data dokončení se
+    berou jako starší než řez, ale ten předpoklad neplatí pro titul, který
+    v době řezu ještě neměl premiéru -- takový se z tréninku musí vyřadit.
+    Na reálném seznamu jde o jednotky titulů, je to levná pojistka.
+    """
+    frm = ((e.jikan or {}).get("aired") or {}).get("from")
+    if frm:
+        return str(frm)[:10]
+    sd = (e.anilist or {}).get("startDate") or {}
+    if sd.get("year"):
+        return f"{sd['year']:04d}-{(sd.get('month') or 1):02d}-{(sd.get('day') or 1):02d}"
+    return None
+
+
 def _clean_anilist_description(text: str) -> str:
     """AniList description je HTML-ish (<br>, <i>, &amp;) a obsahuje
     ~!spoiler!~ bloky -- pro report potřebujeme čistý text bez spoilerů."""

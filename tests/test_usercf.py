@@ -6,8 +6,9 @@ import pytest
 
 from animodel.config import Config, RecommendCfg
 from animodel.usercf import (
-    Senpai, _norm_score, _pearson, discover_candidates, evaluate_candidate,
-    evaluate_candidates, hydrate_entries, select_senpai, recommend_from_senpai,
+    Senpai, _norm_score, _pearson, buhlmann_k, discover_candidates,
+    evaluate_candidate, evaluate_candidates, fit_senpai_baseline,
+    hydrate_entries, select_senpai, recommend_from_senpai,
     find_senpai_recommendations,
 )
 
@@ -220,6 +221,46 @@ def test_fav_miss_penalty_zero_disables_feature():
     assert s.penalty == 1.0
 
 
+def test_constant_rater_is_not_a_senpai_anymore():
+    """Kdo dává všemu maximum, byl dřív skoro ideální senpai: jeho „odchylka
+    od komunity" je čistý obraz komunity a při β≈0,49 vyšla podobnost 0,39+
+    (16 z 20 vybraných takových bylo -- HODNOCENI §9c, nález #2). Vůči
+    VLASTNÍ baseline má ale rezidua nulová."""
+    my = {m: 7.0 + m % 4 for m in range(1, 31)}
+    entries = [_entry(m, 10.0, avg=60 + m) for m in range(1, 31)]
+    s = evaluate_candidate(7, "vse-desitky", {"fmt": "POINT_10", "entries": entries},
+                           my, watched_ids=set(my), shrink_k=1.0)
+    assert s.similarity == 0.0
+    assert select_senpai([s], senpai_count=5, min_full_overlap=3) == []
+
+
+def test_baseline_line_needs_enough_points():
+    """Přímka proložená pár body projde i vyloženým výstřelkem a tím ho
+    z podobnosti vymaže -- pod prahem se použije jen průměr."""
+    few = [_entry(m, 8.0, avg=50 + m) for m in range(5)]
+    a, b = fit_senpai_baseline(few, "POINT_10")
+    assert (a, b) == (pytest.approx(0.8), 0.0)
+
+    many = [_entry(m, 10 * (0.3 + 0.5 * (50 + m) / 100.0), avg=50 + m)
+            for m in range(25)]
+    a2, b2 = fit_senpai_baseline(many, "POINT_10")
+    assert b2 == pytest.approx(0.5, abs=0.02)
+    assert a2 == pytest.approx(0.3, abs=0.02)
+
+
+def test_similarity_uses_my_residual_when_model_provides_it():
+    """Moje strana podobnosti = reziduum z modelu (známka − očekávání podle
+    komunity), ne surová odchylka od komunity."""
+    my = {1: 9.0, 2: 9.0, 3: 9.0}
+    entries = [_entry(1, 9.5, avg=90), _entry(2, 9.0, avg=75), _entry(3, 8.5, avg=60)]
+    userlist = {"fmt": "POINT_10", "entries": entries}
+
+    raw = evaluate_candidate(7, "a", userlist, my, set(my), 1.0)
+    with_resid = evaluate_candidate(7, "a", userlist, my, set(my), 1.0,
+                                    my_resid={1: 0.5, 2: 0.0, 3: -0.5})
+    assert raw.similarity < 0 < with_resid.similarity
+
+
 def test_evaluate_candidate_no_overlap_gives_zero_score():
     s = evaluate_candidate(7, "cizinec", {"fmt": "POINT_10",
                                           "entries": [_entry(99, 8.0)]},
@@ -332,22 +373,66 @@ def test_select_senpai_applies_thresholds_and_count():
 
 def test_recommend_from_senpai_differential_and_min_raters():
     s1 = Senpai(uid=1, name="a", similarity=0.6, score=0.5, overlap=50,
-                n_rated=3, n_novel=2, personal_avg=0.8, fmt="POINT_10",
+                n_rated=3, n_novel=2, personal_avg=0.8, base_a=0.8, base_b=0.0,
+                fmt="POINT_10",
                 entries=[_entry(10, 10.0, avg=80), _entry(11, 9.0, avg=70),
                          _entry(5, 9.0)])
     s2 = Senpai(uid=2, name="b", similarity=0.4, score=0.25, overlap=45,
-                n_rated=2, n_novel=1, personal_avg=0.7, fmt="POINT_10",
+                n_rated=2, n_novel=1, personal_avg=0.7, base_a=0.7, base_b=0.0,
+                fmt="POINT_10",
                 entries=[_entry(10, 9.0, avg=80)])
     out = recommend_from_senpai([s1, s2], rated_ids={5}, min_raters=2)
 
     # titul 5 mám ohodnocený -> pryč; titul 11 má jen 1 hodnotitele -> pryč
     assert [r["mal_id"] for r in out] == [10]
     r = out[0]
-    # ruční výpočet: diff1 = 1.0-0.8=0.2, diff2 = 0.9-0.7=0.2
-    # w_diff = (0.5*0.2 + 0.25*0.2)/(0.75) = 0.2; cf = 0.8 + 0.2 + 0 = 1.0
+    # diff se měří vůči BASELINE senpaie: diff1 = 1.0-0.8 = 0.2,
+    # diff2 = 0.9-0.7 = 0.2 → w_diff = 0.2; cf = 0.8 + 0.2 = 1.0
     assert r["cf_score"] == pytest.approx(10.0)
     assert r["n_users"] == 2
     assert r["top_raters"][0][0] == "a"
+    # kredibilita se z jediného titulu se dvěma hodnotiteli odhadnout nedá
+    assert r["signal"] == 0.0
+
+
+def test_signal_is_shrunk_deviation_without_community():
+    """Do kompozitu jde jen odchylka od baseline senpaie, smrštěná podle
+    kredibility. Komunita má vlastní složku (`w_quality`) a přes user-CF se
+    započítávala podruhé -- korelace signálu s komunitou byla 0,86–0,93
+    (HODNOCENI §9c, nález #3)."""
+    eps, devs = 0.005, [0.00, 0.02, 0.04, 0.06, 0.08, 0.10]
+    ent_a, ent_b = [], []
+    for i, d in enumerate(devs):
+        mid = 10 + i
+        avg = 95 if i == len(devs) - 1 else 80    # poslední má vyšší komunitu
+        ent_a.append(_entry(mid, 10 * (0.8 + d + eps), avg=avg))
+        ent_b.append(_entry(mid, 10 * (0.8 + d - eps), avg=avg))
+
+    def _s(uid, entries):
+        return Senpai(uid=uid, name=f"u{uid}", similarity=0.5, score=0.5,
+                      overlap=50, n_rated=len(entries), n_novel=len(entries),
+                      personal_avg=0.85, base_a=0.8, base_b=0.0,
+                      fmt="POINT_10", entries=entries)
+
+    out = {r["mal_id"]: r for r in
+           recommend_from_senpai([_s(1, ent_a), _s(2, ent_b)], rated_ids=set())}
+    assert len(out) == len(devs)
+    # signál roste s odchylkou, ne s komunitou
+    assert out[15]["signal"] > out[12]["signal"] > out[10]["signal"]
+    assert out[10]["signal"] == pytest.approx(0.0, abs=0.01)
+    # a je vždy menší než nesmrštěná odchylka
+    assert all(abs(r["signal"]) <= abs(r["diff"]) / 10 + 1e-9 for r in out.values())
+    # komunita zvedne cf_score v reportu, do signálu nepromluví
+    assert out[15]["cf_score"] > out[14]["cf_score"] + 1.0
+
+
+def test_buhlmann_k_needs_disagreement_and_spread():
+    """K = rozptyl uvnitř titulu / rozptyl mezi tituly. Když se tituly neliší
+    (nebo je málo dat), kredibilita se odhadnout nedá a signál se nepoužije."""
+    assert buhlmann_k({1: [0.1, 0.2], 2: [0.1, 0.2]}) is None       # málo titulů
+    assert buhlmann_k({m: [0.1, 0.1] for m in range(6)}) is None    # nulový rozptyl
+    k = buhlmann_k({m: [0.1 * m + 0.01, 0.1 * m - 0.01] for m in range(6)})
+    assert k is not None and k > 0
 
 
 # ── orchestrátor end-to-end ──────────────────────────────────────────────

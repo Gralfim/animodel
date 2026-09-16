@@ -285,6 +285,32 @@ def test_user_animelist_keeps_scored_dropped_and_collects_planning(tmp_path, no_
     assert post.calls == 1
 
 
+def test_user_animelist_dedups_titles_listed_in_custom_lists(tmp_path, no_sleep):
+    """AniList vrací titul v KAŽDÉM listu, kam ho uživatel zařadil (status
+    list i vlastní listy). Bez deduplikace ho senpai pipeline počítala
+    víckrát: nafouknutý překryv, zdvojená váha v Pearsonovi a jeden senpai
+    jako dva hodnotitelé (HODNOCENI_PROJEKTU.md §9c). Deduplikuje se při
+    ČTENÍ, takže oprava platí i pro už uloženou v2 cache."""
+    scored = {"status": "COMPLETED", "score": 9,
+              "media": {"idMal": 1, "averageScore": 80, "title": {"romaji": "A1"}}}
+    planned = {"status": "PLANNING", "score": 0,
+               "media": {"idMal": 4, "averageScore": 85, "title": {"romaji": "A4"}}}
+    resp = FakeResponse(200, {"data": {"MediaListCollection": {
+        "lists": [{"entries": [scored, planned]},      # status listy
+                  {"entries": [scored, planned]}],     # + vlastní list s týmiž tituly
+        "user": {"mediaListOptions": {"scoreFormat": "POINT_10"}},
+    }}})
+    client, post = make_client(tmp_path, [resp], no_sleep)
+
+    data = client.get_user_animelist(42)
+    assert data["entries"] == [[1, 9, 80, "A1"]]
+    assert data["planning"] == [4]
+
+    # druhé čtení jde z cache (žádný další request) a je deduplikované taky
+    assert client.get_user_animelist(42) == data
+    assert post.calls == 1
+
+
 def test_airing_batch_computes_fields_and_is_not_cached(tmp_path, no_sleep):
     media = [
         {"idMal": 1, "status": "RELEASING", "episodes": 12,

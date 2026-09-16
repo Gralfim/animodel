@@ -130,6 +130,11 @@ class Cluster:
                                      # náladu hodnotím nad baseline (komunita
                                      # + můj posun) -- synergický efekt celé
                                      # nálady, ne jen součtu jejích atributů
+    n_eff: float = 0.0               # Σ vah členů = kolik důkazů nálada nese
+    affinity_shrunk: float = 0.0     # affinity · n_eff/(n_eff+K): jediné místo
+                                     # modelu, kde se dřív nesmršťovalo. Malá
+                                     # nálada (Σ vah 11) tak mluvila stejně
+                                     # silně jako velká (§9c, návrh P21)
     centroid: dict = field(default_factory=dict)  # {feat_key: souřadnice} pro
                                      # NENULOVÉ složky těžiště klastru. Plný
                                      # profil nálady, ne jen 6 slov signatury --
@@ -185,6 +190,14 @@ class TasteModel:
                                           # viz _calibrate_scale.
         self.cv_rmse: float = 0.0
         self.cv_mae: float = 0.0
+        self.raw_center: float = 0.0      # vážený tréninkový průměr singl+párové
+                                          # složky (viz _fit_center) -- bez něj
+                                          # afinita není centrovaná a predikce
+                                          # vychází systematicky nadsazená
+        self.cv_scheme: str = "grouped"   # foldy po FRANŠÍZÁCH (series_root):
+                                          # 95 ze 103 franšíz se dřív rozpadlo
+                                          # do víc foldů a sourozenec v tréninku
+                                          # dělal CV optimistickou (§9c)
         self.cv_rmse_no_triples: float = 0.0  # nejlepší CV RMSE při vypnutých
                                           # trojicích -- kolik reálně přinesly
         self.resid_std: float = 1.0       # pro intervaly predikce
@@ -210,6 +223,7 @@ class TasteModel:
         self._resid = {t.mal_id: self._target(t) for t in self.titles}
         self._fit_effects()
         self._fit_interactions()
+        self._fit_center()
         # n_clusters se předává rovnou sem -- dřív se klastrovalo jednou tady
         # (vždy s k=None/auto, config se ignoroval) a pak ZNOVU explicitně
         # v cli.py s cfg.model.n_clusters, což zdvojovalo celý KMeans+silhouette
@@ -339,6 +353,28 @@ class TasteModel:
                 ))
         self.interactions.sort(key=lambda x: -abs(x.lift))
 
+    def _fit_center(self):
+        """
+        Vážený tréninkový průměr singl+párové složky afinity.
+
+        Efekty jsou smrštěné průměry reziduí, ale jejich SOUČET přes desítky
+        atributů titulu centrovaný není: in-sample vychází +0,19, takže
+        predikce byla systematicky nadsazená (CV bias −0,17 proti +0,01
+        u samotné baseline, na disjunktních časových oknech −0,25 a u vybraných
+        titulů ještě víc -- „3-gatsu no Lion" 9,08 proti skutečné 7).
+
+        Po odečtení průměru je bias na oknech −0,07 a CV RMSE o ~0,028 nižší.
+        Na ŘAZENÍ to samo o sobě nesahá (konstantní posun se v z-skóre
+        vykrátí), ale kalibrace `s` už nebojuje s posunem hladiny, takže
+        vyjde vyšší -- a tím se mění poměr afinity a cluster_fit uvnitř
+        taste_fit (HODNOCENI_PROJEKTU.md §9c, nález #4).
+
+        Trojice se necentrují: u většiny titulů jsou nulové, takže jejich
+        průměr je ~0 a odečítat ho by jen posunulo hladinu zpátky.
+        """
+        self.raw_center = self._weighted_mean(
+            [(self._resid_parts(t.attrs)[0], t.weight) for t in self.titles])
+
     def _fit_triples(self):
         """
         Hierarchické synergie trojic (experiment, config
@@ -430,7 +466,8 @@ class TasteModel:
 
     def affinity(self, attrs: dict[str, AttrValue]) -> float:
         """
-        Kalibrovaná predikce afinity: `scale·(singly+páry) + scale_triples·trojice`.
+        Kalibrovaná predikce afinity:
+        `scale·(singly+páry − raw_center) + scale_triples·trojice`.
 
         Veřejné API pro řazení (recommend.py, season.py) -- ty dřív sahaly
         na `_raw_resid_pred`, tedy na NEškálovaný součet. To bylo neškodné,
@@ -439,10 +476,27 @@ class TasteModel:
         je právě ta informace, kterou CV o trojicích zjistila.
         """
         base, tri = self._resid_parts(attrs)
-        return self.scale * base + self.scale_triples * tri
+        return self.scale * (base - self.raw_center) + self.scale_triples * tri
+
+    def residuals(self) -> dict[int, float]:
+        """
+        {mal_id: reziduum} natrénovaných titulů (známka − baseline).
+
+        Veřejné API pro usercf.py: podobnost senpai se počítá na reziduích,
+        ne na surové odchylce od komunity -- jinak vychází jako nejpodobnější
+        ten, kdo jen kopíruje dav (HODNOCENI_PROJEKTU.md §9c, nález #2).
+        """
+        return dict(self._resid)
 
     #: grid kandidátů pro `scale` i `scale_triples` (0.00, 0.05, …, 1.00)
     _SCALE_GRID = tuple(i / 20 for i in range(0, 21))
+    #: zamíchání CV, přes která se sčítají čtverce chyb. Jedno zamíchání
+    #: dávalo `s` kolísající o 2 kroky gridu a cv_rmse s sd 0,010 -- snapshoty
+    #: pak hlásily „změnu parametrů", která byla jen artefakt seedu. Se třemi
+    #: je rozptyl cv_rmse ~2,5x nižší a `s` drží do jednoho kroku (§9c).
+    #: S trojicemi zůstává jedno: fold-model tam klastruje (~5,5 s na průchod)
+    #: a nestabilitu `s₃` tři zamíchání stejně neodstraní.
+    _CV_SHUFFLES = (42, 43, 44)
 
     def _calibrate_scale(self):
         """
@@ -467,7 +521,8 @@ class TasteModel:
         rozdíl proti `cv_rmse` je poctivá odpověď na „přinesly trojice
         vůbec něco?".
         """
-        rows = self._cv_predictions()
+        seeds = (self._CV_SHUFFLES[:1] if self.use_triples else self._CV_SHUFFLES)
+        rows = [r for seed in seeds for r in self._cv_predictions(seed=seed)]
         grid = self._SCALE_GRID
 
         best_rmse, best_mae, best_s, best_st = float("inf"), 0.0, 0.0, 0.0
@@ -490,12 +545,45 @@ class TasteModel:
         self.baseline_rmse, _ = self._eval_scale(rows, 0.0, 0.0)  # jen ū + beta·komunita
         self.resid_std = self.cv_rmse
 
+    def _fold_of(self, folds: int, seed: int) -> dict[int, int]:
+        """
+        Přiřazení titulů do foldů PO FRANŠÍZÁCH (`series_root`, standalone
+        každý sám). Dřív se foldy přidělovaly po titulech, jenže 95 ze 103
+        franšíz se tím rozpadlo do víc foldů a 355 z 371 franšízových titulů
+        mělo v tréninku sourozence: atributy specifické pro franšízu (studio,
+        staff, řídké tagy) do testu protáhly její identitu a CV byla
+        optimistická (cv_rmse 0,892 proti 0,925 po opravě, OOF Spearman 0,39
+        proti 0,26 -- HODNOCENI_PROJEKTU.md §9c, nález #5).
+
+        Skupiny se zamíchají seedem a greedy se přidělují do nejméně
+        zaplněného foldu, takže velké franšízy foldy nerozhodí.
+        """
+        groups: dict = defaultdict(list)
+        for i, t in enumerate(self.titles):
+            key = t.series_root if t.series_root is not None else ("solo", t.mal_id)
+            groups[key].append(i)
+        keys = list(groups)
+        random.Random(seed).shuffle(keys)
+        keys.sort(key=lambda k: -len(groups[k]))      # shuffle rozhoduje remízy
+        sizes = [0] * folds
+        fold_of: dict[int, int] = {}
+        for k in keys:
+            f = min(range(folds), key=lambda j: sizes[j])
+            sizes[f] += len(groups[k])
+            for i in groups[k]:
+                fold_of[i] = f
+        return fold_of
+
     def _cv_predictions(self, folds: int = 5, seed: int = 42) -> list[tuple]:
         """
         Jednou přefituje fold-modely a pro každý out-of-fold titul vrátí
         čtveřici (baseline_predikce, singly+páry, trojice, skutečné_skóre).
         Vyhodnocení libovolného `(s, s_triples)` je pak čistá aritmetika nad
         těmito čtveřicemi (_eval_scale) -- žádné další fitování.
+
+        Singl+párová složka je CENTROVANÁ průměrem FOLD-modelu (`_fit_center`),
+        ne plného modelu -- jinak by do foldu prosákla hladina spočtená i z
+        jeho testovací pětiny.
 
         S `interaction_triples` fold-model klastruje a fituje trojice SÁM,
         na svých 4/5 dat. Je to dražší (~0,3 s na fold; sklearn už je v tu
@@ -505,14 +593,14 @@ class TasteModel:
         modelu by do každého foldu protáhlo znalost jeho testovací pětiny --
         a přesně tomu se kalibrace vyhýbá.
         """
-        rng = random.Random(seed)
+        fold_of = self._fold_of(folds, seed)
         idx = list(range(len(self.titles)))
-        rng.shuffle(idx)
-        fold_of = {i: k % folds for k, i in enumerate(idx)}
         rows: list[tuple] = []
         for f in range(folds):
             train = [self.titles[i] for i in idx if fold_of[i] != f]
             test = [self.titles[i] for i in idx if fold_of[i] == f]
+            if not train or not test:
+                continue
             sub = TasteModel(self.K, self.min_attr_count,
                              self.int_min_count, self.int_min_lift,
                              interaction_triples=self.use_triples,
@@ -522,13 +610,14 @@ class TasteModel:
             sub._resid = {t.mal_id: sub._target(t) for t in train}
             sub._fit_effects()
             sub._fit_interactions()
+            sub._fit_center()
             if self.use_triples:
                 sub._fit_clusters(self._n_clusters)
                 sub._fit_triples()
             for t in test:
                 base, tri = sub._resid_parts(t.attrs)
-                rows.append((sub._baseline_pred(t.community), base, tri,
-                             t.user_score))
+                rows.append((sub._baseline_pred(t.community),
+                             base - sub.raw_center, tri, t.user_score))
         return rows
 
     @staticmethod
@@ -557,6 +646,11 @@ class TasteModel:
         vysvětlení; spoiler=True znamená, že tag je na AniListu
         spoiler-flagged (obecně, nebo pro TENHLE konkrétní titul) a report
         ho umí přepínačem skrýt.
+
+        Pozn.: příspěvky se sčítají BEZ centrování (`raw_center`) -- to je
+        konstanta celého modelu, ne vlastnost atributu, takže do rozpadu
+        „proč" nepatří. Součet příspěvků se proto o `scale·raw_center` liší
+        od `affinity()`.
         """
         base = self._baseline_pred(community)
         pred = base + self.affinity(attrs)
@@ -758,6 +852,7 @@ class TasteModel:
                 idx=c, name=name, size=len(mem),
                 mean_user_score=mean_score, intensity=inten,
                 signature=signature, members=mem, affinity=aff,
+                n_eff=w_tot, affinity_shrunk=aff * w_tot / (w_tot + self.K),
                 centroid=cen, centroid_norm=cen_norm, archetype=arch,
             ))
         clusters.sort(key=lambda x: -x.size)

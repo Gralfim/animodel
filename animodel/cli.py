@@ -22,6 +22,7 @@ samo (HODNOCENI_PROJEKTU.md §2, §9.7).
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import logging
 import os
 import sys
@@ -184,7 +185,7 @@ def fit_model(ctx: RunContext):
     model.fit(titles, n_clusters=cfg.model.n_clusters)
     Steps.detail(f"β={model.beta:+.2f} · scale {model.scale:.2f} · "
                  f"CV RMSE {model.cv_rmse:.3f} "
-                 f"(baseline {model.baseline_rmse:.3f}) · "
+                 f"(baseline {model.baseline_rmse:.3f}; foldy po franšízách) · "
                  f"{len(model.clusters)} nálad")
     if model.triples:
         # Kalibrace běží AŽ PO fitu trojic, takže cv_rmse popisuje model, který
@@ -309,6 +310,51 @@ def run_gen_intensity(ctx: RunContext) -> int:
     return 0
 
 
+def run_backtest(ctx: RunContext, cuts_arg) -> int:
+    """
+    --backtest: časová (out-of-time) validace nad `my_finish_date`.
+
+    Nic neukládá -- žádný snapshot, žádné HTML. Je to měřicí přístroj pro
+    otázky, na které cross-validace odpovídat neumí: revize 2026-09 změřila,
+    že pořadí konfigurací podle OOF metrik je proti pořadí mimo čas
+    antikorelované (HODNOCENI_PROJEKTU.md §9c).
+    """
+    from . import backtest
+    from .enrich import premiere_date
+    from .intensity import load_lexicon
+    cfg = ctx.cfg
+
+    ctx.steps("Obohacuju ohodnocené tituly (z cache) …")
+    enriched = ctx.enricher.enrich_ids([e.mal_id for e in ctx.completed],
+                                       show_progress=True)
+    premieres = {mid: premiere_date(en) for mid, en in enriched.items()}
+    Steps.detail(f"{len(enriched)} titulů · datum premiéry známé u "
+                 f"{sum(1 for v in premieres.values() if v)}")
+
+    cuts = [c for c in (cuts_arg or []) if c] or backtest.default_cuts(ctx.completed)
+    lexicon = load_lexicon(cfg.model.intensity_lexicon)
+
+    def _fit(titles):
+        return TasteModel(
+            shrinkage_k=cfg.model.shrinkage_k,
+            min_attr_count=cfg.model.min_attr_count,
+            interaction_min_count=cfg.model.interaction_min_count,
+            interaction_min_lift=cfg.model.interaction_min_lift,
+            interaction_triples=cfg.model.interaction_triples,
+            intensity=lexicon,
+        ).fit(titles, n_clusters=cfg.model.n_clusters)
+
+    ctx.steps(f"Počítám okna ({len(cuts)} řezů, fit na každé okno) …")
+    res = backtest.run(
+        ctx.completed,
+        build_titles=lambda subset: ctx.enricher.build_titles(subset,
+                                                              show_progress=False),
+        fit=_fit, cuts=cuts, premieres=premieres, progress=Steps.detail)
+    for line in backtest.format_report(res):
+        print(line)
+    return 0
+
+
 def run_season(ctx: RunContext, model, season_arg) -> int:
     """--season: pokračování mých sérií + nové tituly vysílané sezóny."""
     from .season import build_season_view, parse_season_arg
@@ -358,9 +404,66 @@ def _render_cf_report(ctx: RunContext, result, recs_all) -> None:
     Steps.detail(f"→ {cf_html}  ({shown} z {len(result.cf_raw)} CF titulů)")
 
 
-def _record_history(ctx: RunContext, recs_all, model) -> None:
+#: kolik kroků po sériových relacích od viděných a PTW titulů pokrývá log
+#: predikcí. Změřeno na 23 nových shlédnutích od snapshotu 2026-07-28:
+#: pool + PTW 5/23, +1 krok 14/23, +2 kroky 17/23 (HODNOCENI_PROJEKTU.md §9c).
+PREDICTION_LOG_HOPS = 2
+
+
+def _export_date(path: str) -> str:
+    """Datum exportu = mtime souboru. MAL export datum nenese, `saved_at`
+    snapshotu je čas POSLEDNÍHO běhu nad otiskem a max(my_finish_date) je jen
+    dolní odhad, který jde navíc zpětně dopsat."""
+    return _dt.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(
+        timespec="seconds")
+
+
+def _prediction_log(ctx: RunContext, model, recs_all) -> list:
     """
-    Zapíše běh do historie a vyhodnotí starší snapshoty.
+    Predikce pro tituly MIMO pool, které nejspíš uvidíš: celé PTW a neviděné
+    díly franšíz do PREDICTION_LOG_HOPS kroků od viděných a PTW titulů.
+
+    Proč: pool obsahuje jen kandidáty doporučení, jenže noví shlédnutí jsou
+    většinou pokračování a vedlejší obsah rozjetých franšíz -- bez tohohle
+    logu by šla predikce ověřit jen u zlomku nových hodnocení (dnes 2/23).
+
+    Cena: první běh obohatí ~100 titulů, které v cache nejsou (jednorázově,
+    pak jen pár nových na export). Klienti selhání pohlcují, takže titul,
+    který nejde obohatit, v logu prostě chybí.
+    """
+    from . import history
+    enr = ctx.enricher
+    watched, ptw = ctx.watched_ids, ctx.ptw_ids
+    got: dict = {}
+    tried: set[int] = set()
+
+    def enrich(ids):
+        todo = [m for m in ids if m not in tried]
+        if todo:
+            tried.update(todo)
+            got.update(enr.enrich_ids(todo, show_progress=True))
+        return {m: got[m] for m in ids if m in got}
+
+    def relations_of(ids):
+        return enr.relations_data(enrich(ids))
+
+    neighbours = history.franchise_neighbourhood(
+        watched | ptw, relations_of, hops=PREDICTION_LOG_HOPS)
+    pool_ids = {r.mal_id for r in recs_all}
+    targets = sorted((ptw | neighbours) - watched - pool_ids)
+    extra = []
+    for mid, en in enrich(targets).items():
+        pred, lo, hi, _why = model.predict(en.attrs, en.community)
+        extra.append(history.prediction_row(
+            mid, pred, lo, hi, model.affinity(en.attrs), en.community,
+            "ptw" if mid in ptw else "franchise"))
+    return extra
+
+
+def _record_history(ctx: RunContext, result, model, titles) -> None:
+    """
+    Zapíše běh do historie (snapshot v2: + celý pool a log predikcí) a
+    vyhodnotí ledger událostí nad staršími snapshoty.
 
     Klíčem je OTISK STAVU SEZNAMU, ne datum -- ladicí běhy nad týmž exportem
     přepíšou jeden snapshot místo aby jich nasypaly desítky (viz history.py).
@@ -369,18 +472,28 @@ def _record_history(ctx: RunContext, recs_all, model) -> None:
     try:
         from . import history
         cfg = ctx.cfg
-        snap = history.build_snapshot(ctx.entries, recs_all, model, cfg,
-                                      top=cfg.recommend.history_top)
+        # kořeny franšíz spočítal už Recommender (jeden průchod pro sekce
+        # doporučení i pro evaluaci historie)
+        roots = result.roots
+        extra = _prediction_log(ctx, model, result.recs)
+        snap = history.build_snapshot(
+            ctx.entries, result.recs, model, cfg,
+            top=cfg.recommend.history_top,
+            export_date=_export_date(cfg.mal_export),
+            z_params=result.z_params, extra=extra)
         older = [s for s in history.load_snapshots(cfg.history_dir)
                  if s.fingerprint != snap.fingerprint]
         path = history.save_snapshot(snap, cfg.history_dir)
-        Steps.detail(f"→ {path}  (otisk seznamu {snap.fingerprint})")
-        results = [r for r in (history.evaluate(s, ctx.entries) for s in older) if r]
-        for line in history.format_report(results):
+        Steps.detail(f"→ {path}  (otisk seznamu {snap.fingerprint}; pool "
+                     f"{len(snap.pool)}, log predikcí mimo pool {len(extra)})")
+        res = history.evaluate_history(
+            older, ctx.entries, roots=roots,
+            community={t.mal_id: t.community for t in titles},
+            baseline=(model.u_mean, model.c_mean, model.beta),
+            predictions={s.fingerprint: history.load_predictions(cfg.history_dir, s)
+                         for s in older})
+        for line in history.format_report(res):
             print(line)
-        if older and not results:
-            Steps.detail("[historie] starší snapshoty zatím bez měřitelného "
-                         "výsledku (žádné doporučení jsi mezitím nedokoukal)")
     except Exception:
         log.exception("historie: záznam/vyhodnocení selhalo -- běh pokračuje")
 
@@ -396,13 +509,16 @@ def run_recommend(ctx: RunContext, model, titles, save_history: bool) -> int:
                            watched_ids=ctx.watched_ids,
                            show_progress=True, limit=None)
     recs_all = result.recs
-    recs = recs_all[: cfg.recommend.top_n]
-    Steps.detail(f"{len(recs_all)} kandidátů celkem, top {len(recs)} "
-                 f"do globálního přehledu")
+    recs = result.discovery or recs_all[: cfg.recommend.top_n]
+    Steps.detail(f"{len(recs_all)} kandidátů celkem · {len(recs)} nových objevů · "
+                 f"{len(result.ptw_ranked)} z PTW · "
+                 f"{len(result.continuations)} pokračování tvých sérií")
 
     ctx.steps("Generuji HTML …")
     rec_html = os.path.join(cfg.out_dir, "recommendations.html")
-    report.render_recommendations_html(recs, rec_html, ctx.userinfo)
+    report.render_recommendations_html(recs, rec_html, ctx.userinfo,
+                                       ptw=result.ptw_ranked,
+                                       continuations=result.continuations)
     Steps.detail(f"→ {rec_html}")
     mood_html = os.path.join(cfg.out_dir, "recommendations_by_mood.html")
     report.render_cluster_recommendations_html(
@@ -417,7 +533,7 @@ def run_recommend(ctx: RunContext, model, titles, save_history: bool) -> int:
             Steps.detail("[CF report přeskočen — žádné výsledky]")
 
     if cfg.recommend.save_history and save_history:
-        _record_history(ctx, recs_all, model)
+        _record_history(ctx, result, model, titles)
     return 0
 
 
@@ -442,6 +558,8 @@ def _mode_steps(args) -> int:
         return 2                        # sběr atributů + hledání duplicit
     if args.gen_intensity:
         return 2                        # frekvence + universum
+    if args.backtest is not None:
+        return 2                        # obohacení + okna
     if args.no_recommend:
         return 2                        # metadata + model
     if args.season is not None:
@@ -471,6 +589,8 @@ def run(args) -> int:
         return run_analyze_attrs(ctx)
     if args.gen_intensity:
         return run_gen_intensity(ctx)
+    if args.backtest is not None:
+        return run_backtest(ctx, args.backtest)
 
     model, titles = fit_model(ctx)
     if args.no_recommend:
@@ -508,6 +628,12 @@ def main(argv=None) -> int:
                    help="doporučení pro vysílanou sezónu (pokračování tvých sérií "
                         "+ nové tituly, s datem posledního dílu). Bez argumentu = "
                         "aktuální sezóna; nebo napevno např. '--season 2026 summer'")
+    p.add_argument("--backtest", nargs="*", metavar="YYYY-MM-DD",
+                   help="časová validace: fit na titulech dokončených před "
+                        "řezem, test na pozdějších (viz backtest.py). Bez "
+                        "argumentů zvolí řezy podle kvantilů dat dokončení. "
+                        "Nic neukládá -- je to měřicí přístroj pro otázky, "
+                        "na které cross-validace odpovídat neumí")
     p.add_argument("--analyze", action="store_true",
                    help="vypiš přehled nalezených franšízových skupin a skonči")
     p.add_argument("--analyze-attrs", action="store_true",

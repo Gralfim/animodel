@@ -684,8 +684,36 @@ class AniListClient:
         zkusí se příště). Volajícímu (usercf.py) na rozdílu nezáleží:
         v obou případech kandidáta přeskočí bez ztráty místa v poolu.
         """
-        return cached_fetch(self._cf_cache, f"userlist_{uid}_v2",
-                            lambda: self._fetch_user_animelist(uid))
+        return self._dedup_userlist(cached_fetch(
+            self._cf_cache, f"userlist_{uid}_v2",
+            lambda: self._fetch_user_animelist(uid)))
+
+    @staticmethod
+    def _dedup_userlist(data: dict | None) -> dict | None:
+        """
+        Jeden záznam na mal_id (první výskyt).
+
+        `MediaListCollection` vrací titul v KAŽDÉM listu, kam ho uživatel
+        zařadil -- ve status listu i ve vlastních (custom) listech. Bez
+        deduplikace ho senpai pipeline počítala víckrát: nafouknutý překryv
+        (min_full_overlap), zdvojená váha v Pearsonovi, zkreslený osobní
+        průměr a v `rec_count` jeden senpai jako dva hodnotitelé. Na reálné
+        cache mělo duplicity 451 z 2000 seznamů a 2 z 20 senpai byli vybraní
+        jen díky nim (HODNOCENI_PROJEKTU.md §9c).
+
+        Deduplikuje se při ČTENÍ, ne při stahování: oprava tak platí i pro
+        už uloženou v2 cache, bez invalidace a nového stahování.
+        """
+        if not data:
+            return data
+        seen: set[int] = set()
+        entries = []
+        for row in data.get("entries") or []:
+            if row[0] not in seen:
+                seen.add(row[0])
+                entries.append(row)
+        planning = list(dict.fromkeys(data.get("planning") or []))
+        return {**data, "entries": entries, "planning": planning}
 
     def _fetch_user_animelist(self, uid: int) -> Result:
         result = self._request(self.QUERY_USER_ANIMELIST, {"userId": uid})

@@ -70,6 +70,42 @@ SKIP_RELATION_TYPES = {
     "summary",
 }
 
+# Vazby, přes které je titul POKRAČOVÁNÍM rozjeté franšízy. Bez "alternative
+# version": remake ani paralelní adaptace pokračování není (Ookami to
+# Koushinryou 2008 vs. remake 2024, Fate/stay night UBW). Pro VÁHY (build_titles)
+# se naopak alternativní verze slučovat mají -- proto dvě množiny.
+CONTINUATION_RELATION_TYPES = SERIES_RELATION_TYPES - {"alternative version"}
+
+
+def related_ids(data: dict, relation_types: set[str]) -> set[int]:
+    """MAL ID titulů, na které `data` (Jikan tvar) ukazuje danými vazbami."""
+    out: set[int] = set()
+    for rel in data.get("relations") or []:
+        if (rel.get("relation") or "").lower() not in relation_types:
+            continue
+        for entry in rel.get("entry") or []:
+            if entry.get("type") == "anime" and entry.get("mal_id"):
+                out.add(entry["mal_id"])
+    return out
+
+
+def build_roots(ids, relations: dict,
+                relation_types: set[str] = CONTINUATION_RELATION_TYPES
+                ) -> dict[int, int]:
+    """
+    {mal_id: kořen franšízy} pro `ids`.
+
+    Tituly REFERENCOVANÉ z relací vstupují jako uzly union-findu, i když
+    v `ids` nejsou a nikdo je neobohacoval (stejně jako season.py) -- bez
+    nich by se nespojily díly propojené přes řadu, kterou uživatel nemá.
+    """
+    nodes = set(ids)
+    for data in relations.values():
+        nodes |= related_ids(data, relation_types)
+    groups = build_series_groups(sorted(nodes), relations,
+                                 relation_types=relation_types)
+    return {m: root for root, members in groups.items() for m in members}
+
 
 def build_series_groups(
     mal_ids:    list[int],

@@ -14,7 +14,9 @@ model:
   interaction_min_count: 8.0
   interaction_min_lift: 0.30
   interaction_triples: false  # EXPERIMENT: synergie trojic nad jádry nálad
-                              # (hierarchický lift nad singly a páry)
+                              # (hierarchický lift nad singly a páry). Změřeno
+                              # 2026-09 (HODNOCENI §9c): na reálném seznamu bez
+                              # stabilního přínosu, fit ~5.5 s pomalejší
   n_clusters: null          # null = auto podle siluety (4–7); nebo napevno např. 5
   aggregate_franchises: true
   side_story_weight: 0.5    # vliv vedlejšího obsahu franšízy (OVA/speciál/side
@@ -70,7 +72,10 @@ recommend:
   min_mal_rec_votes: 5      # ignoruj MAL doporučení s méně hlasy (šum)
   min_anilist_rec_rating: 3 # ignoruj AniList doporučení se slabším ratingem
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre
-  top_n: 40
+  top_n: 40                 # kolik NOVÝCH OBJEVŮ v globálním přehledu
+                            # (pokračování rozjetých sérií a PTW mají vlastní
+                            # sekce, viz HODNOCENI §9c)
+  ptw_top: 15               # kolik titulů v sekci „z tvého PTW"
   save_history: true        # zapisovat běhy do history_dir. Snapshot se klíčuje
                             # OTISKEM STAVU SEZNAMU, ne datem — ladicí běhy nad
                             # týmž exportem tedy přepisují jeden záznam

@@ -57,6 +57,12 @@ class _Enr:
         self.anilist = anilist
         self.shikimori = None
 
+    def enrich_ids(self, ids, show_progress=True):
+        return {}
+
+    def relations_data(self, enriched):
+        return {}          # bez franšízových vazeb = každý titul sám za sebe
+
 
 def _seed():
     return Title(mal_id=1, title="Seed", user_score=9.0, community=8.0, attrs={})
@@ -175,6 +181,36 @@ def test_user_cf_only_candidate_is_not_buried_by_graph_outlier():
     # by měl (9 vs 3) taky navrch, ale outlier 60 by oba srazil k sobě;
     # podstatné je, že 2 > 3 s jasným odstupem
     assert by_id[2].composite > by_id[3].composite
+
+
+def test_recommend_exposes_z_params_and_taste_components():
+    """Snapshot historie ukládá složky kompozitu i parametry z-skóre, aby
+    šlo pořadí přepočítat jinými vahami bez nového běhu (history.py). Test
+    hlídá, že uložené složky na kompozit opravdu stačí."""
+    cand = {
+        1: {"item_votes": 60.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"MAL-rec"}},
+        2: {"item_votes": 0.0, "user_votes": 9.0, "cf_seeds": [], "sources": {"user-CF"}},
+        3: {"item_votes": 3.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"MAL-rec"}},
+    }
+    result = _run_recommend(cand, {1: 7.0, 2: 8.0, 3: 6.5})
+    assert set(result.z_params) == {"taste_fit", "item_cf", "user_cf", "quality"}
+
+    rc = Config().recommend
+
+    def z(name, x):
+        mean, sd = result.z_params[name]
+        return (x - mean) / sd
+
+    for r in result.recs:
+        expected = (rc.w_taste_fit * z("taste_fit", r.taste_fit)
+                    + rc.w_cf * z("item_cf", math.log1p(r.cf_signal))
+                    + rc.w_user_cf * z("user_cf", r.user_cf_signal)
+                    + rc.w_quality * z("quality", r.community))
+        assert r.composite == pytest.approx(expected)
+        # taste_fit = afinita + w · shoda s náladou; obě složky se ukládají
+        # zvlášť, aby šlo přeladit i cluster_fit_weight
+        assert r.taste_fit == pytest.approx(
+            r.affinity + rc.cluster_fit_weight * r.cluster_fit)
 
 
 # ── HTML karta ukazuje oba signály ───────────────────────────────────────

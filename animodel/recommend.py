@@ -43,8 +43,9 @@ import time
 from dataclasses import dataclass, field
 
 from .taste import TasteModel, Title
-from .enrich import Enricher, Enriched
+from .enrich import Enricher, Enriched, _is_side_content
 from .attributes import AttrValue
+from .series import build_roots, related_ids
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +69,22 @@ class Recommendation:
     synopsis: str = ""
     sources: list = field(default_factory=list)   # ['MAL-rec', 'AniList-rec', 'tag-search']
     user_cf_signal: float = 0.0   # skóre z user-based CF (oddělená složka)
+    affinity: float = 0.0         # kalibrovaná afinita (model.affinity) a
+    cluster_fit: float = 0.0      # shoda s náladou PŘED cluster_fit_weight --
+                                  # obě složky taste_fit zvlášť, aby šla váha
+                                  # nálad později přeladit nad poolem uloženým
+                                  # v historii (taste_fit je jen jejich součet)
     # -- sezónní doporučení (season.py); u ostatních žebříčků zůstávají None --
     finale_date: str | None = None    # datum posledního dílu (ISO), pokud známé
     broadcast: str | None = None      # den vysílání (např. "Mondays")
     airing_status: str | None = None  # RELEASING / FINISHED / NOT_YET_RELEASED
     season_note: str | None = None    # např. "pokračování: X (tvá známka 9)"
+    franchise_members: list = field(default_factory=list)
+                                      # názvy dalších dílů téže franšízy, které
+                                      # karta zastupuje (jedna karta = jedna
+                                      # franšíza, viz Recommender._franchise_views)
+    entry_note: str | None = None     # „začni od: X" u pokračování, jehož
+                                      # předchozí díl jsi neviděl
     prequel_score: float = 0.0        # má známka předchozí řady (řazení sekce
                                       # „pokračování tvých sérií"). Dřív se to
                                       # na dataclass přišpendlovalo dynamicky
@@ -92,9 +104,17 @@ class RecommendResult:
     přejmenování atributu by nic nerozbilo, jen by tiše zmizel CF report
     (HODNOCENI_PROJEKTU.md §2).
     """
-    recs: list                      # seřazené Recommendation
+    recs: list                      # seřazené Recommendation (CELÝ pool)
     senpai: list = field(default_factory=list)      # usercf.Senpai, pro CF report
     cf_raw: list = field(default_factory=list)      # syrové CF dicty, pro CF report
+    z_params: dict = field(default_factory=dict)    # {složka: [mean, sd]} z-skóre
+                                                    # kompozitu -- do snapshotu historie
+    # -- pohledy nad týmž poolem (jedna karta na franšízu, viz _franchise_views) --
+    discovery: list = field(default_factory=list)   # nové objevy: bez PTW a bez
+                                                    # pokračování rozjetých sérií
+    ptw_ranked: list = field(default_factory=list)  # „z tvého PTW" podle kompozitu
+    continuations: list = field(default_factory=list)  # pokračování mých franšíz
+    roots: dict = field(default_factory=dict)       # {mal_id: kořen franšízy}
 
     def __iter__(self):
         """Pohodlí volajícího: `for r in result` iteruje doporučení."""
@@ -104,15 +124,27 @@ class RecommendResult:
         return len(self.recs)
 
 
-def _z(values: list[float]) -> dict:
+class _ZScore:
+    """z-skóre podle rozdělení `values` (robustní na konstantu), volatelné
+    jako funkce. `mean`/`sd` jsou vidět zvenku: ukládají se do snapshotu
+    historie, aby šel kompozit přesně přepočítat nad uloženými složkami
+    poolu i s jinými vahami (history.py, HODNOCENI_PROJEKTU.md §9c)."""
+
+    def __init__(self, values: list[float]):
+        self.n = len(values)
+        self.mean, self.sd = 0.0, 1.0
+        if values:
+            self.mean = sum(values) / self.n
+            var = sum((v - self.mean) ** 2 for v in values) / self.n
+            self.sd = math.sqrt(var) if var > 1e-9 else 1.0
+
+    def __call__(self, x: float) -> float:
+        return (x - self.mean) / self.sd if self.n else 0.0
+
+
+def _z(values: list[float]) -> _ZScore:
     """Vrátí funkci pro z-skóre dle rozdělení values (robustní na konstantu)."""
-    if not values:
-        return lambda x: 0.0
-    n = len(values)
-    mean = sum(values) / n
-    var = sum((v - mean) ** 2 for v in values) / n
-    sd = math.sqrt(var) if var > 1e-9 else 1.0
-    return lambda x: (x - mean) / sd
+    return _ZScore(values)
 
 
 class Recommender:
@@ -305,10 +337,14 @@ class Recommender:
         try:
             senpai, recs = find_senpai_recommendations(
                 self.enr.anilist, user_scores, watched_ids=seen_ids, rc=self.rc,
+                my_resid=self.model.residuals(),
             )
             self._cf = (senpai, recs)        # pro CF HTML report
             for r in recs:
-                bump(r["mal_id"], r.get("score", 1.0), None, "user-CF")
+                # `signal` = smrštěná odchylka od baseline senpaie, BEZ
+                # komunity (ta má v kompozitu vlastní složku) -- viz
+                # usercf.recommend_from_senpai
+                bump(r["mal_id"], r.get("signal", 0.0), None, "user-CF")
             status(f"  user-CF: {len(senpai)} senpai, {len(recs)} kandidátů přidáno")
         except Exception:
             # log.exception, ne print: CF fáze běží klidně hodiny a tohle je
@@ -322,57 +358,88 @@ class Recommender:
     # ── Skórování ──────────────────────────────────────────────────────────────
 
     def _cluster_fit(self, attrs: dict[str, AttrValue]) -> tuple[float, str]:
+        """Shoda s náladou -- viz modulová funkce `cluster_fit` (sdílí ji
+        i sezónní pohled, aby „shoda s vkusem" znamenala v obou reportech
+        totéž)."""
+        return cluster_fit(self.model, attrs)
+
+    # ── franšízové pohledy ──────────────────────────────────────────────────
+
+    def _entry_note(self, rec, rel: dict, enriched_all: dict,
+                    watched_ids: set[int]) -> str | None:
         """
-        Vážený kosinus k nejbližšímu JÁDRU nálady × jeho AFINITA.
+        „začni od: X" pro pokračování, jehož předchozí díl uživatel neviděl.
 
-        Počítá se proti plnému těžišti klastru (`Cluster.centroid`) a jen
-        v prostoru nálady (`model.cluster_feat_keys`). Dřívější verze měla
-        dvě zkreslení (HODNOCENI_PROJEKTU.md §5.4):
-
-          1. jmenovatel bral VŠECHNY atributy kandidáta, včetně studia,
-             formátu, dekády a zdroje -- kategorií, které v klastrovém
-             prostoru vůbec nejsou. Bohatě otagovaný titul tak dostal nižší
-             podobnost bez ohledu na skutečnou shodu s náladou: při týchž
-             třech shodách 0,387 (10 atributů) vs. 0,183 (45). A protože
-             počet tagů nad prahem roste s popularitou, byl to systematický
-             posun proti dobře zdokumentovaným titulům.
-          2. podobnost se měřila jen proti šesti nejvýraznějším osám
-             (zobrazovací signatuře) a binárně -- váhy atributů (AniList
-             rank) se zahazovaly, takže okrajový tag vážil jako hlavní žánr.
+        Jde po řetězci PREQUEL vazeb a hledá nejstarší neviděný díl HLAVNÍHO
+        formátu. Kontrola formátu je nutná: bez ní se za prequel označí i
+        prologová OVA nebo speciál (2 z 8 nálezů na reálném poolu --
+        HODNOCENI_PROJEKTU.md §9c, nález #6). Když prequel v cache není,
+        řetězec skončí -- žádné requesty navíc.
         """
-        if not self.model.clusters:
-            return 0.0, ""
-        feat = self.model.cluster_feat_keys
-        if not feat:
-            return 0.0, ""
-        # kandidátský vektor v prostoru nálady, s vahami jako při fitu
-        vec = {k: av.weight for k, av in attrs.items()
-               if k in feat and av.weight}
-        if not vec:
-            return 0.0, ""
-        v_norm = math.sqrt(sum(w * w for w in vec.values()))
+        seen = {rec.mal_id}
+        current, entry = rec.mal_id, None
+        while True:
+            nxt = None
+            for mid in sorted(related_ids(rel.get(current) or {}, {"prequel"})):
+                en = enriched_all.get(mid)
+                if mid in seen or mid in watched_ids or en is None:
+                    continue
+                if _is_side_content(en):
+                    continue
+                nxt = mid
+                break
+            if nxt is None:
+                return f"začni od: {entry.title}" if entry else None
+            seen.add(nxt)
+            entry, current = enriched_all[nxt], nxt
 
-        best_sim, best_name, best_aff = 0.0, "", 0.0
-        for c in self.model.clusters:
-            if not c.centroid_norm:
+    def _franchise_views(self, recs: list, enriched: dict,
+                         watched_ids: set[int]) -> dict:
+        """
+        Jeden průchod seskupením franšíz nad hotovým poolem:
+
+          * **jedna karta na franšízu** -- zástupce je díl s nejvyšším
+            kompozitem, ostatní se sbalí do `franchise_members`. Skóre se
+            nepřepočítává: měřený rozdíl proti prostému sbalení byl v šumu
+            (§9c, návrh P12);
+          * **pokračování rozjetých sérií** ven z „nových objevů": uživatel si
+            je hlídá sám (všechna 4 v dnešním top-100 měl v PTW), v globálním
+            žebříčku jen zabírala místa objevům;
+          * **„z tvého PTW" zvlášť** -- PTW tvořilo 15-16 ze 40 míst přehledu;
+          * u mid-franchise sequelů štítek „začni od".
+
+        Relace se berou z cache (kandidáti + shlédnuté tituly); referencované
+        tituly vstupují jen jako uzly union-findu, neobohacují se.
+        """
+        watched = sorted(watched_ids)
+        watched_enr = (self.enr.enrich_ids(watched, show_progress=False)
+                       if watched else {})
+        enriched_all = {**watched_enr, **enriched}
+        rel = self.enr.relations_data(enriched_all)
+        roots = build_roots([r.mal_id for r in recs] + watched, rel)
+        watched_roots = {roots.get(m, m) for m in watched}
+
+        by_root: dict = {}
+        collapsed: list = []
+        for r in recs:                      # pool je seřazený podle kompozitu
+            root = roots.get(r.mal_id, r.mal_id)
+            keeper = by_root.get(root)
+            if keeper is not None:
+                keeper.franchise_members.append(r.title)
                 continue
-            dot = 0.0
-            for k, w in vec.items():
-                coord = c.centroid.get(k)
-                if coord:
-                    dot += w * coord
-            if dot <= 0:
-                continue
-            sim = dot / (v_norm * c.centroid_norm)
-            if sim > best_sim:
-                best_sim, best_name, best_aff = sim, c.name, c.affinity
-        # Váž podobnost klastrovou AFINITOU (vážený průměr reziduí členů) --
-        # dřívější `mean_user_score − u_mean` používalo surovou známku, čímž
-        # znovu zanášelo komunitní kvalitu, kterou si model jinde pečlivě
-        # odečítá (klastr mainstreamových hitů vypadal "oblíbeněji", než
-        # odpovídalo skutečnému osobnímu vkladu). Tvar (aff + 1.0) zachovává
-        # původní strukturu: neutrální klastr přispívá ~1×, oblíbený víc.
-        return best_sim * (best_aff + 1.0), best_name
+            by_root[root] = r
+            r.entry_note = self._entry_note(r, rel, enriched_all, watched_ids)
+            collapsed.append(r)
+
+        cont_ids = {r.mal_id for r in collapsed
+                    if roots.get(r.mal_id, r.mal_id) in watched_roots}
+        return {
+            "roots": roots,
+            "continuations": [r for r in collapsed if r.mal_id in cont_ids],
+            "ptw_ranked": [r for r in collapsed if r.ptw][: self.rc.ptw_top],
+            "discovery": [r for r in collapsed
+                          if not r.ptw and r.mal_id not in cont_ids][: self.rc.top_n],
+        }
 
     def recommend(self, all_titles: list[Title], ptw_ids: set[int],
                   watched_ids: set[int], show_progress=True,
@@ -412,7 +479,8 @@ class Recommender:
             raw_resid = self.model.affinity(en.attrs)
             cfit, cname = self._cluster_fit(en.attrs)
             taste_fit = raw_resid + self.rc.cluster_fit_weight * cfit
-            rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname))
+            rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname,
+                         raw_resid, cfit))
 
         if not rows:
             return RecommendResult(recs=[], senpai=senpai, cf_raw=cf_raw)
@@ -426,7 +494,8 @@ class Recommender:
         z_q = _z([(r[1].community or self.model.c_mean) for r in rows])
 
         recs = []
-        for (mid, en, meta, pred, lo, hi, contribs, taste_fit, cname) in rows:
+        for (mid, en, meta, pred, lo, hi, contribs, taste_fit, cname,
+             raw_resid, cfit) in rows:
             comp = (self.rc.w_taste_fit * z_taste(taste_fit)
                     + self.rc.w_cf * z_item(math.log1p(meta["item_votes"]))
                     + self.rc.w_user_cf * z_user(meta["user_votes"])
@@ -436,6 +505,7 @@ class Recommender:
                 community=en.community, pred=pred, pred_lo=lo, pred_hi=hi,
                 taste_fit=taste_fit, cf_signal=meta["item_votes"],
                 user_cf_signal=meta["user_votes"], composite=comp,
+                affinity=raw_resid, cluster_fit=cfit,
                 ptw=(mid in ptw_ids), cluster_name=cname,
                 why=contribs[:6], cf_seeds=meta["cf_seeds"][:5],
                 synopsis=en.synopsis, sources=sorted(meta["sources"]),
@@ -443,5 +513,67 @@ class Recommender:
 
         recs.sort(key=lambda r: -r.composite)
         top = self.rc.top_n if limit == -1 else limit
+        z_params = {name: [z.mean, z.sd] for name, z in (
+            ("taste_fit", z_taste), ("item_cf", z_item),
+            ("user_cf", z_user), ("quality", z_q))}
+        # pohledy se počítají nad CELÝM poolem, ne nad ořezem
+        views = self._franchise_views(recs, enriched, watched_ids)
         return RecommendResult(recs=recs if top is None else recs[:top],
-                               senpai=senpai, cf_raw=cf_raw)
+                               senpai=senpai, cf_raw=cf_raw, z_params=z_params,
+                               **views)
+
+
+def cluster_fit(model, attrs: dict[str, AttrValue]) -> tuple[float, str]:
+    """
+    Vážený kosinus k nejbližšímu JÁDRU nálady × jeho (smrštěná) AFINITA.
+
+    Počítá se proti plnému těžišti klastru (`Cluster.centroid`) a jen
+    v prostoru nálady (`model.cluster_feat_keys`). Dřívější verze měla
+    dvě zkreslení (HODNOCENI_PROJEKTU.md §5.4):
+
+      1. jmenovatel bral VŠECHNY atributy kandidáta, včetně studia,
+         formátu, dekády a zdroje -- kategorií, které v klastrovém
+         prostoru vůbec nejsou. Bohatě otagovaný titul tak dostal nižší
+         podobnost bez ohledu na skutečnou shodu s náladou: při týchž
+         třech shodách 0,387 (10 atributů) vs. 0,183 (45). A protože
+         počet tagů nad prahem roste s popularitou, byl to systematický
+         posun proti dobře zdokumentovaným titulům.
+      2. podobnost se měřila jen proti šesti nejvýraznějším osám
+         (zobrazovací signatuře) a binárně -- váhy atributů (AniList
+         rank) se zahazovaly, takže okrajový tag vážil jako hlavní žánr.
+
+    Afinita nálady je SMRŠTĚNÁ `n_eff/(n_eff+K)` (taste.py) -- byla to jediná
+    veličina modelu bez smrštění, takže malá nálada (Σ vah 11) mluvila stejně
+    silně jako velká. Dřívější tvar `(aff + 1.0)` navíc dělal z cluster_fit
+    hlavně TYPIČNOST (kosinus), protože +1 přebilo afinitu v rozsahu
+    −0,5…+0,2; teď nese to, co má -- o kolik nad baseline tu náladu hodnotím
+    (§9c, návrh P21).
+    """
+    if not model.clusters:
+        return 0.0, ""
+    feat = model.cluster_feat_keys
+    if not feat:
+        return 0.0, ""
+    # kandidátský vektor v prostoru nálady, s vahami jako při fitu
+    vec = {k: av.weight for k, av in attrs.items()
+           if k in feat and av.weight}
+    if not vec:
+        return 0.0, ""
+    v_norm = math.sqrt(sum(w * w for w in vec.values()))
+
+    best_sim, best_name, best_aff = 0.0, "", 0.0
+    for c in model.clusters:
+        if not c.centroid_norm:
+            continue
+        dot = 0.0
+        for k, w in vec.items():
+            coord = c.centroid.get(k)
+            if coord:
+                dot += w * coord
+        if dot <= 0:
+            continue
+        sim = dot / (v_norm * c.centroid_norm)
+        if sim > best_sim:
+            best_sim, best_name = sim, c.name
+            best_aff = getattr(c, "affinity_shrunk", c.affinity)
+    return best_sim * best_aff, best_name

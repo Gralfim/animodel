@@ -156,10 +156,12 @@ class _StubEnricher:
 
 def _cluster(name, sig_key, mean_score, affinity):
     """Klastr s jednoosým těžištěm -- kandidát nesoucí právě `sig_key` má
-    proti němu kosinus 1.0, takže testy izolují vliv afinity."""
+    proti němu kosinus 1.0, takže testy izolují vliv afinity. `n_eff` je
+    velké, takže smrštění afinity (§9c) tu nic neubírá."""
     return Cluster(idx=0, name=name, size=10, mean_user_score=mean_score,
                    intensity=0.0, signature=[(sig_key, sig_key.title(), "genre", 0.5, False)],
                    members=[], affinity=affinity,
+                   n_eff=1000.0, affinity_shrunk=affinity,
                    centroid={sig_key: 1.0}, centroid_norm=1.0)
 
 
@@ -172,23 +174,28 @@ def test_cluster_fit_weights_by_affinity_not_raw_score():
 
     fit_hi, name_hi = rec._cluster_fit({"comedy": AttrValue("genre", 1.0, "Comedy")})
     assert name_hi == "Hi"
-    assert fit_hi == pytest.approx(1.0 * (0.6 + 1.0))   # sim=1 × (aff+1)
+    assert fit_hi == pytest.approx(1.0 * 0.6)          # sim=1 × afinita
 
     fit_lo, name_lo = rec._cluster_fit({"drama": AttrValue("genre", 1.0, "Drama")})
     assert name_lo == "Lo"
-    # vysoké mean_user_score klastru už NEpomáhá -- rozhoduje afinita
-    assert fit_lo == pytest.approx(1.0 * (-0.2 + 1.0))
-    assert fit_hi > fit_lo
+    # vysoké mean_user_score klastru už NEpomáhá -- rozhoduje afinita, a ta
+    # je u „Lo" záporná, takže shoda s ní taste_fit SRÁŽÍ (dřív ji tvar
+    # (aff+1) držel kladnou, viz §9c návrh P21)
+    assert fit_lo == pytest.approx(1.0 * -0.2)
+    assert fit_hi > 0 > fit_lo
 
 
 # ── §5.4: kosinus proti PLNÉMU těžišti, jen v prostoru nálady ───────────
 
-def _centroid_cluster(name, centroid, affinity=0.0):
+def _centroid_cluster(name, centroid, affinity=1.0):
+    """Default afinita 1.0: testy tvaru měří samotný kosinus (cluster_fit =
+    kosinus × afinita), nulová afinita by je vynulovala."""
     norm = math.sqrt(sum(v * v for v in centroid.values()))
     return Cluster(idx=0, name=name, size=10, mean_user_score=8.0,
                    intensity=0.0,
                    signature=[(k, k.title(), "tag", 0.5, False) for k in centroid],
                    members=[], affinity=affinity,
+                   n_eff=1000.0, affinity_shrunk=affinity,
                    centroid=dict(centroid), centroid_norm=norm)
 
 

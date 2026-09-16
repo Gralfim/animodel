@@ -330,7 +330,9 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         '(malé vzorky táhnuté k nule koeficientem K). Atributy se objevují samy z dat — žádný ruční '
         'konfigurák.<br>'
         '<b>4. Nálady.</b> KMeans na normalizovaných atributových vektorech, počet klastrů dle siluety.<br>'
-        '<b>5. Kalibrace.</b> Globální škála a interval predikce z 5-násobné cross-validace. '
+        '<b>5. Kalibrace.</b> Globální škála a interval predikce z 5-násobné cross-validace, '
+        'jejíž foldy se dělí <i>po franšízách</i> (díl série v tréninku by testu prozradil její '
+        'identitu) a sčítají se přes tři zamíchání, ať čísla nekolísají podle seedu. '
         'Trojice (když jsou zapnuté) dostávají <i>vlastní</i> škálu — jsou jiný řád důkazů '
         'než singly a páry, tak se i kalibrují zvlášť. Fold-modely přitom klastrují a hledají '
         'trojice samy na svých 4/5 dat, aby do cross-validace neprosákla znalost testovací části.'
@@ -340,7 +342,8 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
                  f'<span class="mono">{stats.get("baseline_rmse", model.cv_rmse):.3f}</span>. '
                  'Že je rozdíl malý, není chyba — znamená to, že tvá známka ≈ komunita + konstantní '
                  'posun; atributy proto neslouží k hádání čísla, ale k tomu, <i>co</i> vybrat a do '
-                 'jaké nálady to patří.</p>')
+                 'jaké nálady to patří. Číslo je z foldů dělených po franšízách, takže je vyšší '
+                 '(a poctivější) než dřívější dělení po titulech.</p>')
 
     # Kalibrované škály + poctivá odpověď na "přinesly trojice něco?".
     # Obojí měřené na TOMTO modelu (kalibrace běží až po fitu trojic).
@@ -376,6 +379,9 @@ def _rec_card(r, rank: int) -> str:
     ten = (f' · <span class="ten">{_esc(r.title_en)}</span>'
            if r.title_en and r.title_en != r.title else "")
     flag = '<span class="flag">na tvém PTW</span>' if r.ptw else ""
+    # „začni od: X" -- karta je pokračování, jehož předchozí díl jsi neviděl
+    if getattr(r, "entry_note", None):
+        flag += f'<span class="flag">{_esc(r.entry_note)}</span>'
     why_parts = []
     for lab, cat, val, spoil in r.why:
         sign = "pos" if val >= 0 else "neg"
@@ -386,6 +392,13 @@ def _rec_card(r, rank: int) -> str:
     if r.cf_seeds:
         seeds = ('<div class="note" style="margin-top:6px">protože máš rád: '
                  + ", ".join(f'<i>{_esc(s)}</i>' for s in r.cf_seeds) + '</div>')
+    # jedna karta = jedna franšíza; ostatní díly se jen vyjmenují
+    members = getattr(r, "franchise_members", None) or []
+    more = (f'<div class="note" style="margin-top:6px">+ další díly téže '
+            f'franšízy v poolu: ' + ", ".join(f'<i>{_esc(m)}</i>'
+                                              for m in members[:5])
+            + (f' a {len(members) - 5} dalších' if len(members) > 5 else "")
+            + '</div>') if members else ""
     cl = f'<span class="tag">{_esc(r.cluster_name)}</span>' if r.cluster_name else ""
     comm = f'{r.community:.2f}' if r.community is not None else '—'
     syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
@@ -426,24 +439,47 @@ def _rec_card(r, rank: int) -> str:
         f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
         f'{season_line}'
         f'{seeds}'
+        f'{more}'
         + (f'<div class="syn">{syn}</div>' if syn else "")
         + f'<div class="src" style="margin-top:10px">zdroj: {src}</div>'
         f'</div>'
     )
 
 
-def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None) -> str:
+def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None,
+                                ptw: list = None, continuations: list = None) -> str:
+    """
+    Doporučení ve třech sekcích nad TÝMŽ poolem (viz Recommender._franchise_views):
+    nové objevy, tituly z PTW a pokračování rozjetých sérií. Dřív byly všechny
+    v jednom žebříčku, kde PTW zabíralo 15-16 ze 40 míst a pokračování další
+    (HODNOCENI_PROJEKTU.md §9c).
+    """
     u = _esc((userinfo or {}).get("user_name", "tebe"))
     parts = [_head("Doporučení — animodel")]
     parts.append('<p class="kicker">animodel · doporučení na míru</p>')
     parts.append('<h1>Co sledovat<br><em>dál</em></h1>')
-    parts.append(f'<p class="lead">{len(recs)} dosud neshlédnutých titulů, seřazených podle '
+    parts.append(f'<p class="lead">{len(recs)} nových objevů, seřazených podle '
                  'kompozitního skóre: shoda s tvými atributy a náladami + kolik tvých oblíbených '
-                 'je „doporučuje" + mírná preference kvality. Tituly z tvého plan-to-watch '
-                 'jsou označené.</p>')
+                 'je „doporučuje" + mírná preference kvality. Jedna karta = jedna franšíza; '
+                 'tituly z plan-to-watch a pokračování tvých sérií mají vlastní sekce níž.</p>')
 
     for i, r in enumerate(recs, 1):
         parts.append(_rec_card(r, i))
+
+    if ptw:
+        parts.append('<h2>Z tvého plan-to-watch</h2>')
+        parts.append('<p class="note">Tvůj vlastní výběr, seřazený týmž kompozitem — '
+                     'co z fronty vzít jako další.</p>')
+        for i, r in enumerate(ptw, 1):
+            parts.append(_rec_card(r, i))
+
+    if continuations:
+        parts.append('<h2>Pokračování tvých sérií</h2>')
+        parts.append('<p class="note">Franšízy, ze kterých už něco máš shlédnuté. '
+                     'V objevech nefigurují — hlídáš si je sám a v žebříčku by jen '
+                     'zabíraly místo novým titulům.</p>')
+        for i, r in enumerate(continuations[:15], 1):
+            parts.append(_rec_card(r, i))
 
     parts.append(_foot())
     out = "\n".join(parts)

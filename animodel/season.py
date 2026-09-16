@@ -22,7 +22,8 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 
-from .recommend import Recommendation
+from .enrich import _is_side_content
+from .recommend import Recommendation, cluster_fit
 from .series import build_series_groups
 
 log = logging.getLogger(__name__)
@@ -90,14 +91,24 @@ def finale_date(airing: dict | None) -> str | None:
 
 def _make_rec(model, en, ptw: bool, airing: dict | None,
               season_note: str | None,
-              prequel_score: float = 0.0) -> Recommendation:
-    """Enriched titul → Recommendation s predikcí, 'proč' a airing údaji."""
+              prequel_score: float = 0.0,
+              cluster_fit_weight: float = 0.0) -> Recommendation:
+    """
+    Enriched titul → Recommendation s predikcí, 'proč' a airing údaji.
+
+    `taste_fit` se počítá STEJNĚ jako v globálních doporučeních (afinita +
+    váha × shoda s náladou). Dřív tu byla jen afinita, takže „shoda s vkusem"
+    znamenala v sezónním a globálním reportu jiné číslo (HODNOCENI §9c).
+    """
     pred, lo, hi, contribs = model.predict(en.attrs, en.community)
+    cfit, cname = cluster_fit(model, en.attrs)
     return Recommendation(
         mal_id=en.mal_id, title=en.title, title_en=en.title_en,
         community=en.community, pred=pred, pred_lo=lo, pred_hi=hi,
-        taste_fit=model.affinity(en.attrs), cf_signal=0.0,
-        composite=0.0, ptw=ptw, cluster_name="",
+        taste_fit=model.affinity(en.attrs) + cluster_fit_weight * cfit,
+        affinity=model.affinity(en.attrs), cluster_fit=cfit,
+        cf_signal=0.0,
+        composite=0.0, ptw=ptw, cluster_name=cname,
         why=contribs[:6], cf_seeds=[], synopsis=en.synopsis,
         sources=["season"],
         finale_date=finale_date(airing),
@@ -172,8 +183,17 @@ def build_season_view(model, enricher, my_scores: dict[int, float],
 
     sequels: list[Recommendation] = []
     new_titles: list[Recommendation] = []
+    w_cfit = getattr(rc, "cluster_fit_weight", 0.0)
     for mid, en in enr.items():
+        # stejné prahy jako v globálních doporučeních (recommend.py): slabé
+        # tituly a vedlejší obsah franšíz do přehledu nepatří. Filtr formátu
+        # jen uvnitř skupin k>1 -- standalone OVA/TV special je plnohodnotný
+        # titul (komentář u SIDE_FORMATS to říká, ale hlídá si to volající).
+        if en.community is not None and en.community < rc.min_community:
+            continue
         root = root_of.get(mid, mid)
+        if group_size.get(root, 1) > 1 and _is_side_content(en):
+            continue
         linked = best_in_root.get(root)   # (můj_mal_id, má_známka) nebo None
         ptw = mid in ptw_ids
         if linked and linked[1] >= rc.season_min_prequel_score:
@@ -181,14 +201,16 @@ def build_season_view(model, enricher, my_scores: dict[int, float],
             pname = prequel.title if prequel else f"#{linked[0]}"
             note = f"pokračování: {pname} (tvá známka {linked[1]:.0f})"
             sequels.append(_make_rec(model, en, ptw, airing.get(mid), note,
-                                     prequel_score=linked[1]))
+                                     prequel_score=linked[1],
+                                     cluster_fit_weight=w_cfit))
         else:
             note = None
             if linked:   # franšíza, kterou znám, ale hodnotil jsem < práh
                 note = "pokračování série (tvá známka pod prahem)"
             elif group_size.get(root, 1) > 1:  # pokračování série, kterou nemám
                 note = "pokračování — předchozí díly neviděny"
-            new_titles.append(_make_rec(model, en, ptw, airing.get(mid), note))
+            new_titles.append(_make_rec(model, en, ptw, airing.get(mid), note,
+                                        cluster_fit_weight=w_cfit))
 
     # pokračování: podle mé známky předchozí řady, pak taste_fit
     sequels.sort(key=lambda r: (-r.prequel_score, -r.taste_fit))

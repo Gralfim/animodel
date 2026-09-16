@@ -69,7 +69,9 @@ class Senpai:
     overlap: int           # kolik titulů máme ohodnocených OBA
     n_rated: int           # kolik má ohodnoceno celkem
     n_novel: int           # kolik z jeho titulů já nemám shlédnutých
-    personal_avg: float    # jeho osobní průměr (0–1) pro diferenciální skóre
+    personal_avg: float    # jeho osobní průměr (0–1) -- metrika do reportu
+    base_a: float | None = None   # jeho baseline vůči komunitě: norm ≈ a + b·c
+    base_b: float | None = None   # (None = spočítá se z `entries` při použití)
     fav_covered: int = 0   # kolik mých oblíbených má ohodnocených nebo na PTW
     fav_total: int = 0     # kolik oblíbených mám celkem
     penalty: float = 1.0   # faktor za nepokryté oblíbené (1.0 = bez penalizace)
@@ -146,12 +148,58 @@ def discover_candidates(client, user_scores: dict[int, float], *,
 
 # ── Fáze 2+3: plné seznamy a senpai skóre ────────────────────────────────
 
+#: kolik ohodnocených titulů musí senpai mít, aby se jeho baseline prokládala
+#: přímkou. Na pár bodech přímka projde i vyloženým výstřelkem (a tím ho
+#: z podobnosti vymaže) -- pod prahem se proto použije jen jeho průměr.
+MIN_BASELINE_POINTS = 20
+
+
+def fit_senpai_baseline(entries, fmt: str | None) -> tuple[float, float]:
+    """
+    Jeho vlastní baseline vůči komunitě: `norm ≈ a + b·c` (nejmenší čtverce
+    přes VŠECHNY jeho ohodnocené tituly). Stejný tvar, jaký model používá
+    pro mě (`ū + β·(komunita − c̄)`).
+
+    Proč: dřív se podobnost počítala mezi `moje − komunita` a `jeho −
+    komunita`. Kdo dává všemu maximum, má „jeho − komunita" = konstanta −
+    komunita, tedy čistý obraz komunity, a při β≈0,49 vyjde vysoce podobný
+    (teoreticky 0,392, u vybraných 0,41–0,48). Na reálných datech mělo
+    16 z 20 vybraných senpai rozptyl známek < 0,05 (HODNOCENI §9c, nález #2).
+    Po odečtení JEHO baseline má konstantní hodnotitel rezidua identicky
+    nulová, Pearson vyjde 0 a `select_senpai` ho vyřadí přes `score > 0` --
+    bez nového prahu.
+
+    Málo bodů nebo nulový rozptyl komunity → `b = 0` a `a` = průměr.
+    """
+    pts = [(avg_raw / 100.0, _norm_score(raw, fmt))
+           for _mid, raw, avg_raw, _t in entries if raw]
+    if not pts:
+        return 0.0, 0.0
+    mean_c = sum(c for c, _n in pts) / len(pts)
+    mean_n = sum(n for _c, n in pts) / len(pts)
+    if len(pts) < MIN_BASELINE_POINTS:
+        return mean_n, 0.0
+    var_c = sum((c - mean_c) ** 2 for c, _n in pts)
+    if var_c < 1e-9:
+        return mean_n, 0.0
+    cov = sum((c - mean_c) * (n - mean_n) for c, n in pts)
+    b = cov / var_c
+    return mean_n - b * mean_c, b
+
+
 def evaluate_candidate(uid: int, name: str, userlist: dict,
                        my_scores: dict[int, float], watched_ids: set[int],
                        shrink_k: float, favorites: set[int] | None = None,
-                       fav_miss_penalty: float = 0.0) -> Senpai:
+                       fav_miss_penalty: float = 0.0,
+                       my_resid: dict[int, float] | None = None) -> Senpai:
     """
     Senpai metriky JEDNOHO kandidáta z jeho plného seznamu.
+
+    Podobnost = Pearson mezi MÝM reziduem (`my_resid`, tedy známka minus to,
+    co u mě čeká model podle komunity) a JEHO reziduem vůči vlastní baseline
+    (`fit_senpai_baseline`). Bez `my_resid` se použije prostá odchylka od
+    komunity jako dřív -- vzorec je scale-invariantní, takže obojí jde
+    kombinovat.
 
     `favorites` = mé nejoblíbenější tituly (mal_id). Senpai, který je nemá
     ohodnocené ani na PTW, dostane lehkou srážku skóre úměrnou podílu
@@ -170,6 +218,7 @@ def evaluate_candidate(uid: int, name: str, userlist: dict,
     novel = 0
     norms: list[float] = []
     rated_ids: set[int] = set()
+    base_a, base_b = fit_senpai_baseline(entries, fmt)
     for mid, raw, avg_raw, _title in entries:
         norm = _norm_score(raw, fmt)
         norms.append(norm)
@@ -180,8 +229,9 @@ def evaluate_candidate(uid: int, name: str, userlist: dict,
         if not my_raw:
             continue
         c_norm = avg_raw / 100.0
-        my_diffs.append(my_raw / 10.0 - c_norm)
-        their_diffs.append(norm - c_norm)
+        my_diffs.append(my_resid[mid] if my_resid and mid in my_resid
+                        else my_raw / 10.0 - c_norm)
+        their_diffs.append(norm - (base_a + base_b * c_norm))
 
     n = len(my_diffs)
     similarity = _pearson(my_diffs, their_diffs)
@@ -201,6 +251,7 @@ def evaluate_candidate(uid: int, name: str, userlist: dict,
         n_rated=len(entries),
         n_novel=novel,
         personal_avg=(sum(norms) / len(norms)) if norms else 0.7,
+        base_a=base_a, base_b=base_b,
         fav_covered=covered, fav_total=len(favs), penalty=penalty,
         fmt=fmt, entries=entries,
     )
@@ -224,7 +275,8 @@ def evaluate_candidates(client, candidates: list[tuple[int, str, float, int]],
                         favorites: set[int] | None = None,
                         fav_miss_penalty: float = 0.0,
                         scan_budget_factor: float = 3.0,
-                        keep_entries: bool = False) -> list[Senpai]:
+                        keep_entries: bool = False,
+                        my_resid: dict[int, float] | None = None) -> list[Senpai]:
     """
     Projde kandidáty v pořadí priority a vyhodnotí `candidate_pool`
     POUŽITELNÝCH plných seznamů (privátní/smazané/dočasně selhané se
@@ -255,7 +307,8 @@ def evaluate_candidates(client, candidates: list[tuple[int, str, float, int]],
             continue   # privátní/smazaný (trvale) nebo dočasné selhání
         senpai = evaluate_candidate(
             uid, name, userlist, my_scores, watched_ids, shrink_k,
-            favorites=favorites, fav_miss_penalty=fav_miss_penalty)
+            favorites=favorites, fav_miss_penalty=fav_miss_penalty,
+            my_resid=my_resid)
         if not keep_entries:
             senpai.entries = []   # viz docstring; doplní hydrate_entries()
         evaluated.append(senpai)
@@ -300,12 +353,56 @@ def select_senpai(evaluated: list[Senpai], *, senpai_count: int,
 
 # ── Fáze 4: doporučení od senpai ─────────────────────────────────────────
 
+def _variance(xs) -> float:
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    m = sum(xs) / n
+    return sum((x - m) ** 2 for x in xs) / (n - 1)
+
+
+def buhlmann_k(per_title: dict[int, list[float]]) -> float | None:
+    """
+    Kredibilitní konstanta K pro smrštění `n/(n+K)`:
+    K = rozptyl UVNITŘ titulu (jak se senpai mezi sebou liší) / rozptyl MEZI
+    tituly (kolik signálu vůbec je). Odvozená z dat, ne nastavená od stolu --
+    stejná filozofie jako `n/(n+K)` u efektů, párů i podobnosti.
+
+    None = nedá se odhadnout: málo titulů s aspoň dvěma hodnotiteli, nebo
+    rozptyl mezi tituly vyjde ≤ 0 (senpai tituly fakticky nerozlišují).
+    Volající pak signál nepoužije -- radši nic než náhodné číslo s vahou 0,6.
+    """
+    groups = [v for v in per_title.values() if len(v) >= 2]
+    if len(groups) < 5:
+        return None
+    within = sum(_variance(v) for v in groups) / len(groups)
+    means = [sum(v) / len(v) for v in groups]
+    inv_n = sum(1.0 / len(v) for v in groups) / len(groups)
+    between = _variance(means) - within * inv_n
+    if within <= 0 or between <= 0:
+        return None
+    return within / between
+
+
 def recommend_from_senpai(senpai: list[Senpai], rated_ids: set[int],
                           *, min_raters: int = 2) -> list[dict]:
     """
-    Diferenciální agregace přes vybrané senpai:
-        diff  = jeho_norm − jeho_osobní_průměr
-        cf    = komunita + Σ(score·diff)/Σ(score) + malý bonus za počet
+    Diferenciální agregace přes vybrané senpai. Dvě čísla na titul:
+
+        diff     = jeho_norm − jeho_baseline(a + b·komunita)
+        cf_score = komunita + Σ(score·diff)/Σ(score) + bonus za počet  → CF report
+        signal   = Σ(score·diff)/Σ(score) · n/(n+K)                    → kompozit
+
+    `signal` schválně NEobsahuje komunitu ani bonus za počet: komunita má
+    v kompozitu vlastní složku (`w_quality`) a přes user-CF se započítávala
+    podruhé -- korelace `user_cf_signal` s komunitou byla 0,86–0,93 a rozptyl
+    komunitní části 0,78 proti 0,11 u rozdílové (HODNOCENI §9c, nález #3).
+    Chybějící hodnota je pak apriorní 0 („nic o tom nevím"), ne −6 sigma.
+
+    Odchylka se měří vůči BASELINE senpaie, ne vůči jeho osobnímu průměru:
+    u někoho, kdo kopíruje dav, by jinak každý komunitně vysoko hodnocený
+    titul vypadal jako jeho osobní favorit.
+
     Vyloučeny jen MNOU OHODNOCENÉ tituly -- shlédnuté-neohodnocené v surovém
     výstupu zůstávají (CF report je označí štítkem „už shlédnuto"; z
     finálních žebříčků je vyřadí bump() přes seen_ids).
@@ -316,36 +413,49 @@ def recommend_from_senpai(senpai: list[Senpai], rated_ids: set[int],
     comm_norm: dict[int, float] = {}
     title_store: dict[int, str] = {}
     raters: defaultdict[int, list] = defaultdict(list)
+    per_title: defaultdict[int, list] = defaultdict(list)
 
     for s in senpai:
+        a, b = s.base_a, s.base_b
+        if a is None or b is None:            # Senpai složený ručně/ze starých dat
+            a, b = fit_senpai_baseline(s.entries, s.fmt)
         for mid, raw, avg_raw, title in s.entries:
             if mid in rated_ids:
                 continue
-            norm = _norm_score(raw, s.fmt)
-            agg_diff[mid] += s.score * (norm - s.personal_avg)
+            c = avg_raw / 100.0
+            diff = _norm_score(raw, s.fmt) - (a + b * c)
+            agg_diff[mid] += s.score * diff
             agg_score[mid] += s.score
             rec_count[mid] += 1
-            comm_norm[mid] = avg_raw / 100.0
+            comm_norm[mid] = c
+            per_title[mid].append(diff)
             if title and mid not in title_store:
                 title_store[mid] = title
             raters[mid].append((s.score, s.name))
 
+    k = buhlmann_k(per_title)
+    if k is None:
+        log.warning("user-CF: kredibilitu odchylek senpai nejde odhadnout "
+                    "(málo titulů s víc hodnotiteli, nebo se tituly neliší) "
+                    "-- složka do kompozitu nevstoupí")
+
     out = []
     for mid, total in agg_diff.items():
-        if rec_count[mid] < min_raters:
+        n = rec_count[mid]
+        if n < min_raters:
             continue
         c = comm_norm.get(mid, 0.5)
         w_diff = total / agg_score[mid] if agg_score[mid] else 0.0
-        n_bonus = 0.03 * math.log1p(max(0, rec_count[mid] - 2))
+        n_bonus = 0.03 * math.log1p(max(0, n - 2))
         cf_raw = max(0.0, c + w_diff + n_bonus)
         top_r = sorted(raters[mid], key=lambda x: -x[0])[:5]
         out.append({
             "mal_id":     mid,
-            "score":      cf_raw * 10.0,   # pro bump()
+            "signal":     (w_diff * n / (n + k)) if k is not None else 0.0,
             "cf_score":   cf_raw * 10.0,
             "community":  c * 10.0,
             "diff":       w_diff * 10.0,
-            "n_users":    rec_count[mid],
+            "n_users":    n,
             "top_raters": [(name, round(sc, 3)) for sc, name in top_r],
             "title":      title_store.get(mid, ""),
         })
@@ -356,10 +466,14 @@ def recommend_from_senpai(senpai: list[Senpai], rated_ids: set[int],
 # ── Orchestrátor ─────────────────────────────────────────────────────────
 
 def find_senpai_recommendations(client, user_scores: dict[int, float],
-                                watched_ids: set[int], rc) -> tuple[list[Senpai], list[dict]]:
+                                watched_ids: set[int], rc,
+                                my_resid: dict[int, float] | None = None
+                                ) -> tuple[list[Senpai], list[dict]]:
     """
     Celý senpai pipeline. `user_scores` = {mal_id: moje_známka 1-10},
-    `watched_ids` = vše shlédnuté (pro novelty metriku), `rc` = RecommendCfg.
+    `watched_ids` = vše shlédnuté (pro novelty metriku), `rc` = RecommendCfg,
+    `my_resid` = {mal_id: moje reziduum} z modelu (TasteModel.residuals) --
+    podobnost se pak počítá na reziduích místo surové odchylky od komunity.
     """
     candidates = discover_candidates(
         client, user_scores,
@@ -385,6 +499,7 @@ def find_senpai_recommendations(client, user_scores: dict[int, float],
         shrink_k=rc.user_cf_shrink_k,
         favorites=favorites,
         fav_miss_penalty=rc.user_cf_fav_miss_penalty,
+        my_resid=my_resid,
     )
     senpai = select_senpai(
         evaluated,

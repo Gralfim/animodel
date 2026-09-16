@@ -1067,6 +1067,217 @@ k revizi zdrojů. Až se pro to někdo rozhodne, bude to stát další bump cach
 
 ---
 
+## 9c. Revize predikcí, doporučení a historie (2026-09-15)
+
+*Kolo 3. Zadání: lepší predikce a doporučení + jak využít historii hodnocení
+ke zpřesnění současných a k novým statistikám. Postup: čtyři analytické
+průchody kódem a daty (31 návrhů), pak **nezávislé přeměření a adversariální
+revize** v šesti skupinách (každá měřila znovu vlastním kódem) a kontrola
+úplnosti. Vše offline nad cache, bez sítě, bez zásahu do repozitáře; nad
+skutečným seznamem (487 ohodnocených, 3 snapshoty, 339 titulů s datem
+dokončení). Čísla jsou změřená, ne odvozená ze čtení kódu.*
+
+### 9c.1 Nálezy v kódu
+
+| # | nález | stav |
+|---|---|---|
+| **1** | **Duplicitní položky v AniList userlistech — VYSOKÁ.** `_fetch_user_animelist` (`anilist.py:700-718`) prochází všechny listy `MediaListCollection` **včetně vlastních (custom)** a nededuplikuje podle `mal_id`. Titul zařazený ve status listu i ve vlastním se počítá dvakrát: nafouknutý `overlap` (a tím `min_full_overlap`), zdvojená váha v Pearsonovi, zkreslený `personal_avg` a v `rec_count` jeden senpai jako dva hodnotitelé. Změřeno: duplicity v **451 z 2000** vyhodnocených seznamů (79 269 položek), **2 z 20** dnešních senpai vybraní jen díky nim, **40 titulů** projde `min_raters=2` jen díky duplicitě, Bühlmannovo K 3,21 → **21,3** po deduplikaci. | ✅ **OPRAVENO** — dedup při ČTENÍ, takže platí i pro existující v2 cache bez nového stahování |
+| **2** | **Podobnost senpai odměňuje konstantní hodnotitele — VYSOKÁ.** `evaluate_candidate` (`usercf.py:182-184`) koreluje `(moje − komunita)` s `(jeho − komunita)`. Kdo dává všemu maximum, je čistý obraz komunity a při β≈0,49 vyjde vysoce podobný: teoretická korelace **0,392**, u vybraných 0,41–0,48. Změřeno: **16 z 20** vybraných senpai má sd normalizovaných známek < 0,05 (v eligible poolu 5,9 %), korelace skóre se sd **−0,571**, první hodnotitel se sd ≥ 0,1 je až 22. v pořadí. Normalizace škál je přitom správná (ověřeno na surových datech 2000 seznamů, žádná známka nepřesahuje dělitel formátu) — chyba je v tom, co podobnost odměňuje. | otevřené (krok 6) |
+| **3** | **User-CF složka nese podruhé komunitu — VYSOKÁ.** `recommend_from_senpai` vrací `(komunita + diff + bonus)·10` (`usercf.py:337-344`), což jde přes `bump` jako `user_votes` do vlastního z-skóre s vahou 0,6 — vedle `w_quality` 0,3. Změřeno na poolu: korelace `user_cf_signal` s komunitou **0,86–0,93**, rozptyl komunitní části 0,78 proti 0,11 u rozdílové. S dnešními konstantními senpai je to fakticky druhá kopie komunitního skóre. Porušuje princip „komunita vstupuje jen jedním sklonem". | otevřené (krok 6, jen spolu s #2) |
+| **4** | **Afinita nemá intercept — STŘEDNÍ.** Součet smrštěných efektů (`taste.py:405-423`) není centrovaný (in-sample průměr **+0,19**) a `_calibrate_scale` (`taste.py:470-491`) hledá `s` podle RMSE bez interceptu. Predikovaná známka je proto systematicky nadsazená: CV bias **−0,17** proti +0,01 u samotné baseline, na disjunktních časových oknech −0,25. Po centrování počítaném ve foldu: CV RMSE −0,028, bias na oknech **−0,07**, žebříček skoro beze změny (top-40 37–38/40, top-100 98–99/100). Vysvětluje i nález „plný model má horší RMSE než baseline" a asymetrii chyb. | otevřené (krok 5) |
+| **5** | **Náhodná CV prosakuje franšízami — STŘEDNÍ.** `_cv_predictions` (`taste.py:508-511`) přiděluje foldy po titulech, ale **95 ze 103** franšíz se rozpadne do víc foldů a **355 z 371** franšízových titulů má sourozence v tréninku. Grouped CV podle `series_root` (18 seedů): cv_rmse 0,892 → **0,925** (znaménko rozdílu se neotočí ani u jednoho seedu), OOF Spearman 0,39 → 0,26, zisk nad baseline 0,053 → 0,024. | otevřené (krok 5) |
+| **6** | **Mid-franchise sequely v doporučeních — STŘEDNÍ.** Kandidáti se skórují po jednotlivých MAL ID (`recommend.py:400-446`), franšíze se používají jen pro váhy a limit seedů. V dnešním top-100 je **6** pokračování s neviděným prequelem hlavního formátu (v top-40 **3**), plus 4 duplicitní franšízy; ve snapshotech bylo #1 „3-gatsu no Lion 2nd Season", zatímco 1. řada byla #3. Všech 8 nálezů má mezi zdroji user-CF — odpovídá to otevřenému nápadu „filtrovat mid-franchise sequely v senpai doporučeních". Pozor: detekce **musí** kontrolovat formát prequelu, jinak prologová OVA dá falešný nález (2 z 8). | otevřené (krok 7) |
+| **7** | **`saved_at` není datum exportu — STŘEDNÍ.** Je to čas POSLEDNÍHO běhu nad otiskem (ladicí běhy ho posouvají). Doloženo: Toaru Index II/III mají `my_finish_date` 07-19 a 07-26, ale ve snapshotu uloženém 07-28 ve `watched_ids` nejsou. Jakákoli sazba „za 30 dní" nad `saved_at` je vychýlená. | ✅ **OPRAVENO** — `export_date` = mtime souboru exportu |
+| **8** | **`load_snapshots` řadilo podle `n_rated`** (`history.py:186`) — počet hodnocených klesne, když titul odhodnotíš nebo smažeš, a pořadí přestane být chronologické; okna ledgeru potřebují čas. | ✅ **OPRAVENO** — řadí podle `saved_at` |
+| **9** | **Mrtvá větev** `cli.py:381-383` („starší snapshoty zatím bez měřitelného výsledku") — `evaluate` vracelo None jen při shodném otisku, který je odfiltrovaný o dva řádky výš. | ✅ odpadlo s evaluate v2 |
+| **10** | Drobnosti: `en.community or self.model.c_mean` (`recommend.py:426,433`) by tiše nahradilo `community == 0.0`; `_is_side_content` (`enrich.py:91-116`) aplikuje formátové pravidlo i na standalone tituly, ačkoli komentář u `SIDE_FORMATS` slibuje jen skupiny k>1 (podmínku dnes drží až volající); `season.py` neaplikuje `min_community` a jeho `taste_fit` nemá `cluster_fit`, takže „shoda s vkusem" znamená v sezónním a globálním reportu jiné číslo. | otevřené (krok 7) |
+
+### 9c.2 Co ukázaly časové řezy (`my_finish_date`)
+
+Nový měřicí nástroj revize: fit na titulech dokončených před T, test na
+pozdějších. Dává **10–20× víc** prospektivních bodů než samotné zásahy
+doporučení a je to jediný způsob, jak rozhodnout strukturální volby.
+
+- **Afinita mimo čas řadí slabší, než slibuje CV:** test Spearman
+  0,36/0,26/0,16/0,20 proti CV 0,34/0,40/0,39/0,44. Rozdíl ale táhne hlavně
+  **poslední okno** (od 2026-05, harémové maratony): stratifikovaně po
+  disjunktních oknech 0,39, bez posledního okna **0,56**. Období 2026-07..09
+  je konfundované a jako důkaz se nedá brát samo o sobě.
+- **Vnořené řezy nejsou nezávislá potvrzení** (161 ⊃ 128 ⊃ 115 ⊃ 76).
+  Kritéria typu „CI nad nulou na 3 ze 4 řezů" počítají fakticky tentýž test
+  čtyřikrát. Disjunktní okna mají n = 33/13/39/76 a bootstrap musí být
+  klastrovaný po franšízách (CI o 30–50 % širší než iid).
+- **OOF metriky řadí strukturální volby obráceně než čas:** Kendall tau mezi
+  pořadím konfigurací podle CV a podle času je **−0,47 až −0,87**, a to pro
+  RMSE i pro Spearman. O `min_lift`, K a párech se tedy podle CV rozhodovat
+  nemá — a rovnou z toho plyne i zamítnutí `cv_spearman` jako „lepší" metriky.
+- **Únik přes nedatované tituly je zanedbatelný:** ze 148 hodnocených bez
+  data má premiéru po řezu 2026-01-01 **jediný** (a po 2026-03-01 žádný).
+  Filtr podle data premiéry je levná pojistka, ne nutnost.
+- **Otázka párů zůstává otevřená.** Čistý efekt vypnutí párů (proti téže
+  konfiguraci bez trojic) je +0,040 [−0,03; +0,12] pooled; celý sedí
+  v **pokračováních** (+0,21 na 37 titulech), na nových franšízách je −0,006.
+  Default se proto nemění a rozhodne se to až na nekonfundovaných oknech.
+
+### 9c.3 Změřená zamítnutí (neopakovat)
+
+| co | čím to padlo |
+|---|---|
+| **Trojice** (`interaction_triples`) | `s₃` skáče 0–0,45 podle zamíchání CV a na plných datech je 0 (žebříček tedy beze změny), fit je s nimi ~5,5 s pomalejší; mimo čas pooled +0,035 [−0,01; +0,09]. **Vypnuto v `config.yaml`**, kód zůstává |
+| **K = 4** | CV RMSE ho preferuje (0,908 vs 0,914), časový split ho zamítá: Spearman **−0,042** [−0,08; −0,00] na 4 ze 4 řezů. K a počet párů jsou navíc svázané přes práh na **smrštěném** liftu (`taste.py:332-333`): K4 pustí 33–45 párů, K8 10–19, K16 jen 1–2 — každé srovnání K je zároveň srovnáním párů |
+| **K podle kategorie, kvadratická/kubická baseline, backfitting** | grouped CV 0,9116 (proti 0,9142) / 0,9456→0,9570→0,9625 / 0,9059 při **horším** Spearmanu 0,280 |
+| **Recency vážení podle stáří hodnocení** | zisk je artefakt: nenormalizované vážení sníží sumu vah, tím zesílí smrštění `n/(n+K)` a ořízne efekty pod `min_attr_count`. Kontrola „uniform" (stejná suma vah, žádná informace o čase) reprodukuje **celý** zisk (0,372 vs 0,363); normalizovaná recency dává +0,02 s CI přes nulu |
+| **Únava po náročných titulech** | korelace rezidua s intenzitou 3 předchozích titulů 0,001 [−0,11; 0,10]; autokorelace intenzity po vyloučení dvojic téže franšízy 0,016 |
+| **Report posunu vkusu s permutační nulou** | síla **3 %** pro posun −0,5 u atributu s n_eff ≥ 10 (spolehlivě detekovatelný je až posun o celý bod, kterého by sis všiml sám); gate by skoro vždy mlčel |
+| **Asymetrický interval predikce z OOF kvantilů** | mimo čas ±`cv_rmse` pokrývá 0,68–0,78 při nominálních 0,68, kvantilový interval by nadpokrýval ještě víc. Původní „pokrytí 0,63" míchalo chyby ze seskupené OOF s `cv_rmse` z náhodné CV. Bias patří řešit u zdroje (nález #4) |
+| **Výběr počtu nálad podle stability (ARI)** | žádný měřitelný dopad (OOF Spearman ±0,01, top-40 39/40) za +3,3 s na fit; silueta navíc **není** na úrovni šumu (permutovaný null 0,022–0,030 proti 0,071–0,089). Kdo chce stabilní jména nálad, má `n_clusters: 4` |
+| **`cv_spearman` jako rozhodovací metrika** | pořadí konfigurací mimo čas předpovídá obráceně (tau −0,47 až −0,87), stejně jako RMSE |
+| **Ladění vah kompozitu na retro-poolu** | rozlišení nestačí: v retro-poolu je jen 44–45 % pozdějších shlédnutí, top-100 je 27 % poolu (náhodné pořadí dá 16–18 zásahů z 51–60) a marginály mění mezi řezy znaménko. Silná původní čísla navíc pocházela z poolu s **dnešním** user-CF |
+| **Franšízový efekt v predikované známce pokračování** | na vlastním kritériu (−0,03 RMSE na 3 ze 4 řezů) neuspěl: −0,02/−0,02/0,00/+0,01. Zůstává nanejvýš jako vysvětlující údaj v kartě |
+
+### 9c.4 Chyby v metodice měření (poučení pro příští experimenty)
+
+Revize našla víc chyb v *měření* než v samotném kódu. Stojí za zapsání,
+protože se budou opakovat:
+
+1. **Selection leak ve franšízovém backtestu.** Detekce pokračování běžela
+   nad `watched ∪ cíle ∪ top-400`, takže cíl (později shlédnutý titul) byl
+   rozpoznán kdekoli v poolu, zatímco nezkonvertované pokračování jen
+   v top-400. Konverze vyšla 78–81 %; po opravě **38–43 %**, medián pořadí
+   #291 → **#1008**, AUC kompozitu uvnitř sekce 0,29 → **0,69**. Celá teze
+   „pokračování mají nejvyšší úspěšnost a kompozit je řadí špatně" na tom stála.
+2. **Srovnání proti produkci míchá dva zásahy.** „Páry OFF" se měřilo proti
+   konfiguraci *s trojicemi*; čistý efekt párů je pak podstatně menší.
+3. **Retro-pool s dnešním user-CF.** Pooly 4060/3963 obsahovaly 4046 položek
+   ze současné senpai cache a jen ~370 z rec grafů, takže „citlivost `w_cf`"
+   měřila hlavně poměr zdrojů kandidátů v poolu, ne váhu.
+4. **Tautologické kritérium.** Rozdíl reziduální a surové delty je identicky
+   `β·(rozdíl průměrné komunity)`, takže test „liší se aspoň o 0,3" projde vždy.
+5. **Interval jen z kontrolní skupiny.** Bootstrap přes kontrolu při n_rec = 1
+   dává pokrytí 0,36–0,51 — strana doporučení s jedním bodem rozptyl nenese.
+6. **Offline pooly nemají discovery větev.** `search_by_tags` se záměrně
+   necachuje, takže každá offline rekonstrukce poolu tag-search postrádá.
+   Závěry o top-100 to nemění, absolutní velikosti poolů ano.
+
+### 9c.5 Historie hodnocení: co z ní jde vytěžit
+
+Data dnes: 3 snapshoty (7 týdnů), 23 nových shlédnutí, z toho **2 z doporučení
+a obě z jedné franšízy**. Většina nových shlédnutí jsou pokračování a vedlejší
+obsah rozjetých franšíz, které v poolu doporučení vůbec nejsou.
+
+Simulace síly (franšízové dvojice, pozorovaná konverze) říká, na co čekat:
+
+| za | zásahů doporučení | síla pro skutečnou Δ = +0,5 | pro Δ = +1,0 |
+|---|---|---|---|
+| 6 měsíců | ~4–7 | 0,31–0,33 | 0,58–0,71 |
+| 12 měsíců | ~7–15 | 0,35–0,50 | 0,72–0,93 |
+
+Z toho plyne pořadí priorit: **hustota dat je důležitější než chytřejší
+metrika**. Nejhustší zpětná vazba nejsou zásahy doporučení (~1 měsíčně), ale
+**porovnání uložené predikce se skutečnou známkou u všech nově shlédnutých
+titulů** (~13 měsíčně). Proto snapshot v2 ukládá log predikcí i mimo pool.
+
+Implementováno v tomto kole:
+
+- **Snapshot v2** (`history.py`): stav celého seznamu (`status`, známka,
+  `finish_date`), `export_date` z mtime exportu, `u_mean`/`c_mean` a
+  z-parametry složek kompozitu, celý pool se složkami (`affinity` a
+  `cluster_fit` zvlášť, aby šlo přeladit i `cluster_fit_weight`) a log
+  predikcí mimo pool. Pool a log jdou do vedlejšího `{n}_{otisk}.pool.json`
+  bez odsazení. **6 desetinných míst** je nutnost: se 4 se přepočtené pořadí
+  celého poolu liší u 374 kandidátů.
+- **Log predikcí** (`cli._prediction_log`): PTW + neviděné díly franšíz do
+  2 kroků od viděných a PTW titulů. Změřené pokrytí 23 nových shlédnutí:
+  pool + PTW 5/23, +1 krok 14/23, **+2 kroky 17/23**.
+- **evaluate v2** (`history.evaluate_history`): ledger událostí — každé nové
+  shlédnutí jednou, přiřazené oknu mezi snapshoty, s první expozicí. Nahrazuje
+  blok za každý snapshot (tentýž titul se dřív počítal vícekrát; dnes 4 proti
+  2 skutečným událostem). Metriky: počty po oknech a kohortách místo sazeb,
+  známky **po franšízách** surově i vůči baseline z komunity s 95 % intervalem
+  ze sd celého seznamu, kontrola i bez pokračování rozjetých franšíz, kbelíky
+  pořadí až od 3 titulů, a prospektivní porovnání predikce se známkou zvlášť
+  pro nové franšízy a pokračování.
+
+Co se vědomě **nezavedlo**: smrštěná delta (smrštění k nule by „málo dat"
+ukázalo jako „žádný efekt"), stavový automat trychtýře R→P→W→C (za 7 týdnů
+jediný přechod R→P; užitečná část je jedno číslo v řádku okna), sazby
+konverze za 30 dní (potřebují `export_date` a ≥ 15 událostí v kohortě),
+percentil v uloženém poolu (dává smysl až s poolem v historii a ~20
+událostmi) a penalizace za opakované ignorování doporučení.
+
+### 9c.6 Verdikty 31 návrhů
+
+Po nezávislém přeměření: **4 keep, 21 revise, 6 drop**. Vybrané (plný seznam
+s čísly je v příloze revize):
+
+| id | návrh | verdikt |
+|---|---|---|
+| P01 | snapshot v2 (stav seznamu, pool, z-parametry) | keep (upraveno: celý pool, 6 míst, mtime místo max finish_date) |
+| P02 | časová validace na `my_finish_date` | revise — jako vývojářský skript, disjunktní okna, cluster bootstrap |
+| P03 | ukončit experiment s trojicemi | keep |
+| P04 | grouped CV podle `series_root` | keep (spolu s centrováním, krok 5) |
+| P05 | retro-pool a ladění vah | revise — jen jako nástroj, váhy neměnit |
+| P06–P09, P15–P19, P26 | metriky historie | revise — konsolidováno do jednoho evaluate v2 |
+| P10 | `cv_spearman` jako metrika | **drop** |
+| P11 | sekce pokračování s vlastním řazením | revise — jen vyřadit z „nových objevů" |
+| P12 | jedna karta na franšízu | revise — bez přepočtu skóre, se štítkem „začni od" |
+| P13 + P14 | senpai na reziduích + user-CF jako reziduum | keep — jen společně a po deduplikaci |
+| P20–P23, P27 | páry, franšízový efekt, K, opakovaná CV | revise/odloženo |
+| P24 | sezónní view | revise — jen `min_community` a sdílený `taste_fit` |
+| P25 | HTML historie | revise — odloženo, minimální rozsah |
+| P28, P29, P30, P31 | stabilita k, interval, drift, recency | **drop** (P31 = zamítnutí zapsat) |
+
+### 9c.7 Plán a stav
+
+| krok | co | stav |
+|---|---|---|
+| **1** | `interaction_triples: false`; změřená zamítnutí do dokumentace | ✅ hotovo |
+| **2** | deduplikace AniList userlistů | ✅ hotovo |
+| **3** | snapshot v2 + log predikcí | ✅ hotovo |
+| **4** | evaluate v2 (ledger, franšízové intervaly, kohorty, kontrola predikcí) | ✅ hotovo |
+| **5** | časový harness (`backtest.py`, `--backtest`) → centrování afinity + grouped CV + R=3 zamíchání, jednou změnou kalibrace | ✅ hotovo |
+| **6** | senpai na reziduích + user-CF jako smrštěné reziduum | ✅ hotovo |
+| **7** | jeden průchod seskupením franšíz: karta na franšízu, pokračování mimo „nové objevy", sekce „Z tvého PTW", `cluster_fit` se smrštěním, sezónní view | ✅ hotovo |
+| **8** | až s daty (≥ 6 měsíců): páry × franšízový efekt, percentil v poolu, sazby kohort, HTML historie, případné ladění vah | otevřené |
+
+### 9c.8 Co ukázal první běh po implementaci (2026-09-16)
+
+Ověřeno offline nad reálnou cache; testů 258 → **292**, všechny zelené.
+
+**Kalibrace (krok 5).** Nekorigovaná afinita měla na tréninku posun
+**+0,625** — přesně ta chybějící konstanta z nálezu #4. Po vycentrování:
+
+| veličina | před | po |
+|---|---|---|
+| `scale` | 0,30 | **0,35** |
+| CV RMSE | 0,8917 (náhodné foldy) | **0,9104** (po franšízách, poctivější) |
+| průměr predikce in-sample | nadsazený | **8,04** proti skutečnému průměru 8,07 |
+| bias na časových oknech | −0,25 | **−0,03** |
+
+Časová validace (4 disjunktní okna, bootstrap po franšízách) navíc obrátila
+dřívější závěr „model je horší než baseline": pooled RMSE **0,808 → 0,757**,
+Spearman **+0,348 [+0,17; +0,50]**. Tři ze čtyř oken mají Spearman 0,43–0,55;
+poslední (od 2026-06-27, harémové maratony) −0,01 — potvrzuje, že to období
+je konfundované a jako důkaz se brát nedá.
+
+**User-CF (krok 6).** Konstantních hodnotitelů mezi vybranými senpai
+**16/20 → 0/20**, podobnost vybraných je teď 0,17–0,28 (reziduální, tedy
+nižší čísla než dřívější 0,43 vůči komunitě). Korelace user-CF složky
+s komunitním skóre **0,86–0,93 → −0,001**: komunita vstupuje do kompozitu
+jen jednou.
+
+**Franšízové pohledy (krok 7).** Přehled má 40 objevů, 15 titulů z PTW a
+26 pokračování rozjetých sérií ve vlastních sekcích. Mid-franchise sequelů
+zbyl v objevech **1 ze 40** (se štítkem „začni od: Little Busters!"), zbytek
+se sbalil pod lépe hodnocený díl téže franšízy.
+
+Řazení se změnilo znatelně (shoda s předchozím modelem: top-40 27/40,
+top-100 79/100), což odpovídá tomu, že se současně vyměnili senpai, změnil
+tvar `cluster_fit` a povyrostla `scale`. Jestli je to zlepšení, rozhodne až
+historie — proto ledger a log predikcí (kroky 3 a 4) běží první.
+
+---
+
 ## 10. Co bych neměnil
 
 - **Reziduální cíl + zdůvodnění restrikce rozsahu.** Nosná myšlenka, správně

@@ -35,6 +35,7 @@ python -m animodel -e animelist.xml --analyze-attrs  # diagnostika kanonizace at
 python -m animodel -e animelist.xml --gen-intensity  # (re)generace intensity.yaml (osa náročnosti)
 python -m animodel -e animelist.xml --season         # doporučení pro aktuální vysílanou sezónu
 python -m animodel -e animelist.xml --season 2026 summer  # konkrétní sezóna
+python -m animodel -e animelist.xml --backtest       # časová validace modelu (out-of-time)
 python -m animodel -e animelist.xml --no-history     # nezapisuj běh do historie
 python -m animodel -e animelist.xml --verbose        # + rutinní retry/rate-limit hlášky (INFO)
 ```
@@ -103,7 +104,13 @@ animodel proto **necílí na známku, ale na odchylku**:
    navíc **afinitu** — vážený průměr reziduí svých členů (o kolik ji hodnotíš
    nad baseline) — kterou doporučení používají místo surové známky.
 6. **Kalibrace.** Globální škála efektů a interval predikce z 5-násobné
-   cross-validace. Trojice (jsou-li zapnuté) mají **vlastní škálu** — jsou jiný
+   cross-validace, jejíž **foldy se dělí po franšízách** (díl série v tréninku
+   prozradí testu její identitu přes studio, staff a řídké tagy — 95 ze 103
+   franšíz se dřív rozpadlo do víc foldů) a sčítají se přes **tři zamíchání**,
+   ať čísla nekolísají podle seedu. Afinita se navíc **centruje** tréninkovým
+   průměrem: součet smrštěných efektů centrovaný není, takže predikovaná
+   známka vycházela systematicky nadsazená.
+   Trojice (jsou-li zapnuté) mají **vlastní škálu** — jsou jiný
    řád důkazů než singly a páry (řidší podpora, kandidáti z klastrových
    signatur), tak se i kalibrují zvlášť: společný grid přes `(s, s₃)`.
    Fold-modely si přitom klastrují a hledají trojice **samy** na svých 4/5 dat,
@@ -187,8 +194,14 @@ Dvě nezávislé větve, sjednocené a deduplikované:
   kdo tvé nejlepší známky nemá ohodnocené ani na PTW, je slabší průvodce
   (`user_cf_fav_miss_penalty`). **Dropnuté tituly se známkou** se počítají jako
   plnohodnotné hodnocení — „zkusil a dal 3" o shodě vkusu řekne víc než většina
-  desítek. Senpai jsou vidět jmenovitě v CF reportu i s metrikami; doporučení =
-  tituly, které senpai hodnotí nad svůj osobní průměr.
+  desítek. Podobnost se měří na **reziduích**: na mé straně známka minus to, co
+  u mě podle komunity čeká model, na jeho straně odchylka od **jeho vlastní**
+  baseline (`norm ≈ a + b·komunita`). Bez toho vycházel jako nejpodobnější ten,
+  kdo jen kopíruje dav — kdo dává všemu desítku, je čistý obraz komunity a na
+  reálných datech tvořili takoví hodnotitelé 16 z 20 vybraných senpai.
+  Senpai jsou vidět jmenovitě v CF reportu i s metrikami; do kompozitu vstupuje
+  jejich **smrštěná odchylka od baseline** bez komunitního skóre (to má vlastní
+  složku `w_quality`, jinak by se počítalo dvakrát).
   Tvůj vlastní účet se vylučuje (podle jména z MAL exportu; máš-li na AniListu
   jinou přezdívku, přidej ji do `recommend.user_cf_exclude_users`) — import
   vlastního seznamu má podobnost 1.00 a doporučil by ti jen to, co už máš.
@@ -212,8 +225,21 @@ jednotky hlasů jsou šum, skutečně podobné série mívají hlasů desítky.
 rozsahu lepí na komunitní průměr a nerozlišuje). Predikovaná známka + interval se
 počítá zvlášť jen pro zobrazení.
 
-Vyhledává se **nezávisle na PTV**; tituly z tvého plan-to-watch se jen **označí**.
-Už shlédnuté (Completed/Watching/On-Hold/Dropped) se vyřazují.
+Vyhledává se **nezávisle na PTW**; už shlédnuté (Completed/Watching/On-Hold/
+Dropped) se vyřazují. Výstup je rozdělený na **tři sekce nad týmž poolem**:
+
+- **Nové objevy** — jádro přehledu (`top_n`), bez PTW a bez pokračování sérií,
+  které už máš rozjeté.
+- **Z tvého plan-to-watch** (`ptw_top`) — tvůj vlastní výběr seřazený týmž
+  kompozitem. Dřív PTW tituly zabíraly 15–16 ze 40 míst přehledu.
+- **Pokračování tvých sérií** — franšízy, ze kterých už něco máš. Hlídáš si je
+  sám (všechna 4 v dnešní stovce jsi měl v PTW), takže v objevech jen zabírala
+  místo.
+
+**Jedna karta = jedna franšíza:** díly téže série se sbalí pod ten s nejvyšším
+kompozitem a ostatní se jen vyjmenují. Když je kartou pokračování, jehož
+předchozí díl jsi neviděl, dostane štítek **„začni od: X"** (jen hlavní formáty
+— bez té kontroly by se za začátek série označila i prologová OVA).
 
 Pro každý titul: originální i anglický název, synopse, odůvodnění (které atributy
 a které tvé oblíbené ho táhnou), MAL skóre, odhad tvého hodnocení jako interval,
@@ -221,26 +247,55 @@ a do jaké tvé nálady patří.
 
 ### Zpětná vazba z historie
 
-Každý nový MAL export je **ground truth pro předchozí doporučení** — když se
-doporučený titul o pár měsíců později objeví v Completed s devítkou, model
-fungoval. Každý běh se proto zapíše do `history/` a při dalším **změněném**
-exportu se vyhodnotí:
+Každý nový MAL export je **ground truth pro předchozí doporučení** — a zároveň
+pro predikci u všech titulů, které jsi mezitím dokoukal. Každý běh se proto
+zapíše do `history/` a při dalším **změněném** exportu se vyhodnotí:
 
 ```
-── Zpětná vazba z historie ─────────────────────────────
-  snapshot 1efb7447d8cf (2026-07-27, 100 doporučení):
-    dokoukáno 3 (3%) · rozkoukáno 0 · dropnuto 0 · nově v PTW 0
-    tvá známka: doporučené 8.67 (n=3) vs. ostatní nové 6.50 (n=4)  Δ +2.17
-      pořadí 1–10: 2× průměr 9.00
-      pořadí 11–20: 1× průměr 8.00
+── Zpětná vazba z historie (2 snapshoty od 2026-07-28) ─────────────
+  okna mezi snapshoty:
+    2026-07-28 → 2026-08-23: nově shlédnuto 14 · z doporučení 0 · do PTW přidáno 12 (z doporučení: #3 3-gatsu no Lion)
+    2026-08-23 → dnes: nově shlédnuto 9 · z doporučení 2: #1 3-gatsu no Lion 2nd Season (rozkoukáno, 7), #3 3-gatsu no Lion (7) · do PTW přidáno 1
+  vyzkoušeno: z doporučení mimo PTW 2/77 · z doporučení na PTW 0/29 · z PTW mimo doporučení 5/160
+  známky dokoukaných (průměr po franšízách; vůči očekávání = známka − baseline z komunity):
+    doporučené               7.00 · vůči očekávání -1.46  (1 franšíza, 1 titul)
+    ostatní, nové franšízy   7.20 · vůči očekávání -0.37  (5 franšíz, 6 titulů)
+    ostatní vč. pokračování  7.30 · vůči očekávání -0.37  (9 franšíz, 18 titulů)
+    Δ proti novým franšízám: -0.20 (95% ±2.18) · vůči očekávání -1.09 (±2.02) — zatím neprůkazné
+  predikce vs. skutečná známka (uložená predikce u 1/19 dokoukaných; záporný bias = predikce nadsazené):
+    nové franšízy  n=1 · bias -2.07 · RMSE 2.07
 ```
 
-Klíčové číslo je **Δ proti kontrole**: průměrná známka doporučených titulů,
-které jsi mezitím dokoukal, proti průměru ostatních titulů dokoukaných za
-tutéž dobu. Teprve to odpovídá na otázku „jsou doporučení lepší než to, co
-bych si vybral sám?". `hit rate` je naproti tomu vždycky jen spodní odhad
-(jmenovatel je celý snapshot, ale za pár měsíců stihneš dokoukat jednotky) —
-smysl dává hlavně jeho vývoj v čase.
+Co je na tom podstatné:
+
+- **Každé nové shlédnutí se počítá jednou** (ledger událostí), přiřazené oknu
+  mezi snapshoty a *první* expozici v doporučeních. Dřív se vyhodnocoval každý
+  snapshot zvlášť, takže titul doporučený třikrát se započítal třikrát.
+- **Průměry jsou po franšízách, ne po titulech.** Osm dílů jedné série není
+  osm nezávislých důkazů — a přesně tak vypadá typické období sledování.
+- **Kontrola se hlásí dvakrát:** proti novým franšízám (o ty doporučovač
+  soutěží) a proti všem ostatním včetně pokračování rozjetých sérií.
+- **„Vůči očekávání"** = známka minus baseline z komunity. Doporučené tituly
+  mají vyšší komunitní skóre z konstrukce, takže surová Δ míchá vkus s výběrem
+  kvality; rozdíl obou čísel je přesně `β·(rozdíl průměrné komunity)`.
+- **Interval, ne jen číslo.** Při jednotkách událostí je Δ neprůkazná a je to
+  ve výpisu vidět; na rozlišení Δ = +0,5 je potřeba řádově rok sběru.
+- **Predikce se ověřuje i u titulů, které nikdo nedoporučil.** Nových hodnocení
+  přibývá ~13 měsíčně, zásahů doporučení ~1 — tohle je nejhustší zpětná vazba,
+  jakou ze seznamu dostaneš.
+
+**Co snapshot ukládá** (schéma 2): stav celého seznamu (status, známka, datum
+dokončení), datum exportu (mtime souboru), parametry baseline i z-skóre a
+top-100 doporučení. Ve vedlejším souboru `{n}_{otisk}.pool.json` pak **celý
+pool kandidátů** se složkami kompozitu (~400 kB) a **log predikcí** pro tituly
+mimo pool: celé PTW a neviděné díly franšíz do dvou kroků od toho, co máš
+shlédnuté nebo v plánu. Díky poolu jde později přepočítat pořadí s jinými
+vahami bez nového běhu, díky logu má většina nově shlédnutých titulů uloženou
+predikci (samotný pool + PTW by pokryl 5 z 23 nových shlédnutí, s franšízovými
+sousedy je to 17 z 23).
+
+> **První běh po upgradu** stáhne metadata pro ~100 titulů, které dosud nebyly
+> potřeba (PTW mimo pool a franšízoví sousedé). Další běhy je berou z cache.
 
 **Snapshoty se klíčují otiskem stavu seznamu, ne datem.** Ladění parametrů
 znamená desítky běhů nad týmž exportem; datové klíčování by z nich udělalo
@@ -253,6 +308,26 @@ ne sto**. Soubory se jmenují `{počet_hodnocených}_{otisk}.json`, aby šla
 složka číst chronologicky.
 
 Vypnout jde `--no-history` nebo `recommend.save_history: false`.
+
+### Jak z historie vytěžit nejvíc
+
+Úzké hrdlo není frekvence exportů, ale tempo sledování (~13 nových hodnocení
+měsíčně proti ~1 titulu, který vzejde z doporučení). Z toho plyne pár
+praktických věcí:
+
+- **Exportuj a spusť běh zhruba jednou měsíčně.** Častěji se vyplatí jen tehdy,
+  když chceš zachytit cestu *doporučeno → PTW*: přidání do PTW export nedatuje,
+  je vidět jen jako rozdíl mezi dvěma snapshoty. Běh nad teplou cache je levný.
+- **Nech si staré exporty.** `animelist.xml` archivovaný s datem v názvu je
+  jediný způsob, jak historii zrekonstruovat, kdyby se `history/` ztratila —
+  a nese data dokončení, ze kterých žije `--backtest`.
+- **Zálohuj `history/`** (včetně `*.pool.json`). Je to jediná validační data,
+  která nejdou dopočítat zpětně; každý běh bez nich je nevratně ztracený.
+- **Hodnoť i to, co dropneš.** „Zkusil a dal 3" nese víc informace než většina
+  desítek — dropnutý titul bez známky je signál, který se zahodí.
+- **Váhy kompozitu nelaď podle cross-validace.** Pořadí konfigurací podle CV
+  vychází mimo čas obráceně; na strukturální volby je `--backtest`, na váhy je
+  potřeba počkat na dost událostí v historii.
 
 ### Sezónní doporučení (`--season`)
 
@@ -288,7 +363,8 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 | `recommend.cluster_fit_weight` | váha shody s náladou uvnitř `taste_fit` (0 = nálady neřadí) |
 | `recommend.w_taste_fit / w_cf / w_user_cf / w_quality` | váhy 4 složek řazení doporučení |
 | `recommend.min_mal_rec_votes / min_anilist_rec_rating` | prahy síly hrany v grafu podobnosti |
-| `recommend.min_community` | spodní hranice MAL skóre kandidátů |
+| `recommend.min_community` | spodní hranice MAL skóre kandidátů (nově i v sezónním pohledu) |
+| `recommend.ptw_top` | kolik titulů v sekci „z tvého PTW" |
 | `recommend.high_score` | od jaké známky je titul „seed" |
 | `enrich.use_anilist` | vypni pro rychlejší běh jen na MAL |
 | `enrich.use_jikan` | vypni pro nouzový AniList-only režim (viz `--no-jikan`) |
@@ -321,6 +397,8 @@ animodel/
   usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
   season.py         sezónní doporučení (--season): pokračování + nové tituly + finále
   history.py        záznam běhů (klíč = otisk seznamu) + zpětná vazba z nového exportu
+  backtest.py       časová validace nad my_finish_date (--backtest): disjunktní
+                    okna, bootstrap po franšízách, nové franšízy vs. pokračování
   series.py         union-find slučování franšíz
   enrich.py         MAL ID → obohacené Title objekty (s cache)
   taste.py          jádro: baseline, afinitní efekty, interakce, nálady, predikce

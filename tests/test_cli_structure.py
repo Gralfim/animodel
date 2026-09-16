@@ -33,6 +33,7 @@ class _Args:
     """Minimální náhrada argparse.Namespace pro _mode_steps."""
     analyze = analyze_attrs = gen_intensity = no_recommend = False
     season = None
+    backtest = None
 
 
 @pytest.mark.parametrize("attr,expected_total", [
@@ -48,11 +49,14 @@ def test_mode_step_totals(attr, expected_total):
     assert cli.PREPARE_STEPS + cli._mode_steps(args) == expected_total
 
 
-def test_full_and_season_step_totals():
+def test_full_season_and_backtest_step_totals():
     assert cli.PREPARE_STEPS + cli._mode_steps(_Args()) == 5     # plný běh
     args = _Args()
     args.season = []                                            # `--season`
     assert cli.PREPARE_STEPS + cli._mode_steps(args) == 4
+    args = _Args()
+    args.backtest = []                                          # `--backtest`
+    assert cli.PREPARE_STEPS + cli._mode_steps(args) == 3
 
 
 def test_steps_warns_when_mode_declares_too_few(caplog):

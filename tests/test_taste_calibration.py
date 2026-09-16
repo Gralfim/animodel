@@ -23,7 +23,7 @@ def _titles(n=24):
     return out
 
 
-def test_calibration_fits_each_fold_exactly_once(monkeypatch):
+def test_calibration_fits_each_fold_exactly_once_per_shuffle(monkeypatch):
     calls = {"n": 0}
     orig = TasteModel._fit_effects
 
@@ -32,10 +32,62 @@ def test_calibration_fits_each_fold_exactly_once(monkeypatch):
         return orig(self)
 
     monkeypatch.setattr(TasteModel, "_fit_effects", counting)
+    m = TasteModel(shrinkage_k=8.0).fit(_titles())
+    # 1 hlavní model + 5 foldů × 3 zamíchání -- a hlavně NE jednou za každou
+    # hodnotu gridu (dřív 116 fitů, HODNOCENI §5.2). Zamíchání se sčítají,
+    # aby `s` a cv_rmse nekolísaly podle seedu (§9c).
+    assert calls["n"] == 1 + 5 * len(TasteModel._CV_SHUFFLES)
+    assert m.cv_scheme == "grouped"
+
+
+def test_folds_keep_a_franchise_together():
+    """Sourozenec v tréninku prozradí testu identitu franšízy (studio, staff,
+    řídké tagy) a CV je pak optimistická -- foldy se proto dělí po
+    `series_root` (§9c, nález #5)."""
+    titles = _titles(24)
+    for t in titles[:6]:
+        t.series_root = 999                      # jedna šestidílná franšíza
+    m = TasteModel(shrinkage_k=8.0).fit(titles)
+    fold_of = m._fold_of(5, seed=42)
+    assert len(fold_of) == len(titles)
+    assert len({fold_of[i] for i in range(6)}) == 1
+
+
+def test_fold_models_centre_themselves(monkeypatch):
+    """Centrovat afinitu průměrem PLNÉHO modelu by do foldu protáhlo hladinu
+    spočtenou i z jeho testovací pětiny."""
+    calls = {"n": 0}
+    orig = TasteModel._fit_center
+
+    def counting(self):
+        calls["n"] += 1
+        return orig(self)
+
+    monkeypatch.setattr(TasteModel, "_fit_center", counting)
     TasteModel(shrinkage_k=8.0).fit(_titles())
-    # 1 hlavní model + 5 foldů -- NE 116 (1 + 23 vyhodnocení × 5 foldů),
-    # jak to dělala verze volající celou cross-validaci pro každé `s`
-    assert calls["n"] == 6
+    assert calls["n"] == 1 + 5 * len(TasteModel._CV_SHUFFLES)
+
+
+def test_affinity_is_centred_on_the_weighted_training_mean():
+    """Součet smrštěných efektů centrovaný není (in-sample +0,19), takže
+    predikce vycházela systematicky nadsazená (§9c, nález #4)."""
+    m = TasteModel(shrinkage_k=8.0).fit(_titles())
+    assert m.raw_center != 0.0
+    w_sum = sum(t.weight for t in m.titles)
+    mean_aff = sum(m.affinity(t.attrs) * t.weight for t in m.titles) / w_sum
+    assert mean_aff == pytest.approx(0.0, abs=1e-9)
+
+
+def test_centering_shifts_level_but_keeps_ordering():
+    m = TasteModel(shrinkage_k=8.0).fit(_titles())
+    attrs = [t.attrs for t in m.titles]
+    centred = [m.affinity(a) for a in attrs]
+    m.raw_center = 0.0
+    raw = [m.affinity(a) for a in attrs]
+    shifts = [r - c for c, r in zip(centred, raw)]
+    assert max(shifts) - min(shifts) < 1e-9            # konstantní posun
+    assert sorted(range(len(attrs)), key=lambda i: -centred[i]) == \
+           sorted(range(len(attrs)), key=lambda i: -raw[i])
 
 
 def test_each_title_predicted_exactly_once_out_of_fold():

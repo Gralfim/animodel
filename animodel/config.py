@@ -114,6 +114,11 @@ class RecommendCfg:
                                       # top_n, ať má pozdější evaluace statistiku
                                       # i pod hranicí zobrazeného přehledu
     top_n: int = 40                   # kolik doporučení ve globálním přehledu
+    ptw_top: int = 15                 # kolik titulů v sekci „z tvého PTW".
+                                      # PTW tituly zabíraly 15-16 ze 40 míst
+                                      # přehledu; teď mají vlastní sekci, ať
+                                      # objevy dostanou celých top_n
+                                      # (HODNOCENI_PROJEKTU.md §9c)
     top_per_cluster: int = 15         # kolik doporučení na náladu v per-klastr pohledu
     # -- sezónní doporučení (--season, viz season.py) --
     season_min_prequel_score: float = 7.0  # od jaké mé známky předchozí řady se

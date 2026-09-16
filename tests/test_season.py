@@ -56,7 +56,13 @@ def test_finale_finished_uses_end_date():
 # ── fake enricher / model pro build_season_view ─────────────────────────
 
 class FakeModel:
-    """taste_fit = součet vah 'good' atributů (deterministické řazení)."""
+    """taste_fit = součet vah 'good' atributů (deterministické řazení).
+
+    Prázdné nálady: `cluster_fit` pak vrací 0, takže testy měří jen afinitu
+    (v produkci se přičítá `cluster_fit_weight × shoda s náladou`)."""
+    clusters = []
+    cluster_feat_keys = set()
+
     def affinity(self, attrs):
         return sum(av.weight for k, av in attrs.items() if k == "good")
 
