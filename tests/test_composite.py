@@ -25,6 +25,9 @@ class _StubModel:
     def top_effects(self, n=40, sign=1):
         return []
 
+    def residuals(self):
+        return {}
+
     def affinity(self, attrs):
         return 0.0
 
@@ -150,11 +153,14 @@ def test_composite_has_four_components_and_carries_both_signals():
     order = [r.mal_id for r in recs]
     assert order == [1, 2, 3]
 
-    # kompozit kandidáta 1 odpovídá ručnímu výpočtu s log1p tlumením
+    # kompozit kandidáta 1 odpovídá ručnímu výpočtu s log1p tlumením.
+    # Parametry grafu a kvality (i vkusu) jsou z OBSAHOVÉHO poolu -- kandidáti
+    # 1 (MAL-rec) a 3 (tag-search); user-CF kandidát 2 do nich nevstupuje.
+    # User-CF složka se normalizuje přes celý pool (§9d, nález #1).
     cfg = Config()
-    logs = [math.log1p(60.0), 0.0, 0.0]
+    logs = [math.log1p(60.0), 0.0]
     users = [0.0, 9.0, 0.0]
-    comms = [7.0, 7.0, 9.0]
+    comms = [7.0, 9.0]
     def z(vals, x):
         n = len(vals)
         mean = sum(vals) / n
@@ -183,6 +189,32 @@ def test_user_cf_only_candidate_is_not_buried_by_graph_outlier():
     assert by_id[2].composite > by_id[3].composite
 
 
+def test_user_cf_only_pool_does_not_change_weights_of_content_candidates():
+    """Se zapnutým user-CF přibyly do poolu tisíce titulů s nulou v grafu
+    (6 108 z 6 615). Když se z-skóre počítala přes celý pool, sd log-hlasů
+    spadla na 0,6 a každý titul z grafu dostal +3,5 až +6 bodů -- graf
+    fungoval jako brána (§9d, nález #1). Parametry se teď berou z obsahového
+    poolu, takže rozdíly kompozitu mezi obsahovými kandidáty na user-CF
+    kandidátech nezávisí."""
+    content = {
+        1: {"item_votes": 60.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"MAL-rec"}},
+        2: {"item_votes": 5.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"AniList-rec"}},
+        3: {"item_votes": 0.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"tag-search"}},
+    }
+    comms = {1: 7.0, 2: 8.5, 3: 8.0}
+    alone = {r.mal_id: r.composite for r in _run_recommend(content, comms)}
+
+    flooded = dict(content)
+    for mid in range(100, 160):          # 60 kandidátů jen od senpai
+        flooded[mid] = {"item_votes": 0.0, "user_votes": 0.0, "cf_seeds": [],
+                        "sources": {"user-CF"}}
+        comms[mid] = 6.8
+    both = {r.mal_id: r.composite for r in _run_recommend(flooded, comms)}
+
+    assert both[1] - both[2] == pytest.approx(alone[1] - alone[2])
+    assert both[2] - both[3] == pytest.approx(alone[2] - alone[3])
+
+
 def test_recommend_exposes_z_params_and_taste_components():
     """Snapshot historie ukládá složky kompozitu i parametry z-skóre, aby
     šlo pořadí přepočítat jinými vahami bez nového běhu (history.py). Test
@@ -193,7 +225,8 @@ def test_recommend_exposes_z_params_and_taste_components():
         3: {"item_votes": 3.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"MAL-rec"}},
     }
     result = _run_recommend(cand, {1: 7.0, 2: 8.0, 3: 6.5})
-    assert set(result.z_params) == {"taste_fit", "item_cf", "user_cf", "quality"}
+    assert set(result.z_params) == {"taste_fit", "item_cf", "user_cf", "quality",
+                                    "select"}
 
     rc = Config().recommend
 
@@ -205,7 +238,8 @@ def test_recommend_exposes_z_params_and_taste_components():
         expected = (rc.w_taste_fit * z("taste_fit", r.taste_fit)
                     + rc.w_cf * z("item_cf", math.log1p(r.cf_signal))
                     + rc.w_user_cf * z("user_cf", r.user_cf_signal)
-                    + rc.w_quality * z("quality", r.community))
+                    + rc.w_quality * z("quality", r.community)
+                    + rc.w_select * z("select", r.select))
         assert r.composite == pytest.approx(expected)
         # taste_fit = afinita + w · shoda s náladou; obě složky se ukládají
         # zvlášť, aby šlo přeladit i cluster_fit_weight

@@ -167,7 +167,11 @@ def fit_model(ctx: RunContext):
     titles = ctx.enricher.build_titles(ctx.completed, show_progress=True)
     Steps.detail(f"obohaceno {len(titles)} titulů")
 
-    ctx.steps(f"Stavím model vkusu (shrinkage K={cfg.model.shrinkage_k:g}) …")
+    ctx.steps("Stavím model vkusu ("
+              + (f"ridge α={cfg.model.ridge_alpha:g}"
+                 if cfg.model.effect_model == "ridge"
+                 else f"shrinkage K={cfg.model.shrinkage_k:g}")
+              + ") …")
     from .intensity import load_lexicon
     lexicon = load_lexicon(cfg.model.intensity_lexicon)
     if lexicon is None:
@@ -181,6 +185,8 @@ def fit_model(ctx: RunContext):
         interaction_min_lift=cfg.model.interaction_min_lift,
         interaction_triples=cfg.model.interaction_triples,
         intensity=lexicon,
+        effect_model=cfg.model.effect_model,
+        ridge_alpha=cfg.model.ridge_alpha,
     )
     model.fit(titles, n_clusters=cfg.model.n_clusters)
     Steps.detail(f"β={model.beta:+.2f} · scale {model.scale:.2f} · "
@@ -342,6 +348,8 @@ def run_backtest(ctx: RunContext, cuts_arg) -> int:
             interaction_min_lift=cfg.model.interaction_min_lift,
             interaction_triples=cfg.model.interaction_triples,
             intensity=lexicon,
+            effect_model=cfg.model.effect_model,
+            ridge_alpha=cfg.model.ridge_alpha,
         ).fit(titles, n_clusters=cfg.model.n_clusters)
 
     ctx.steps(f"Počítám okna ({len(cuts)} řezů, fit na každé okno) …")
@@ -511,14 +519,24 @@ def run_recommend(ctx: RunContext, model, titles, save_history: bool) -> int:
     recs_all = result.recs
     recs = result.discovery or recs_all[: cfg.recommend.top_n]
     Steps.detail(f"{len(recs_all)} kandidátů celkem · {len(recs)} nových objevů · "
+                 f"{len(result.known)} známých mimo plán · "
                  f"{len(result.ptw_ranked)} z PTW · "
                  f"{len(result.continuations)} pokračování tvých sérií")
+    sel = result.selection
+    if sel is not None:
+        auc = f" · CV AUC {sel.cv_auc:.3f}" if sel.cv_auc is not None else ""
+        avoided = ", ".join(label for label, _c in sel.top_avoided[:5])
+        Steps.detail(f"model výběru: {sel.n} populárních titulů, zájem "
+                     f"{sel.n_engaged / sel.n:.0%}{auc} · nejvíc se vyhýbáš: "
+                     f"{avoided}")
 
     ctx.steps("Generuji HTML …")
     rec_html = os.path.join(cfg.out_dir, "recommendations.html")
     report.render_recommendations_html(recs, rec_html, ctx.userinfo,
                                        ptw=result.ptw_ranked,
-                                       continuations=result.continuations)
+                                       continuations=result.continuations,
+                                       known=result.known,
+                                       known_popularity=cfg.recommend.known_popularity)
     Steps.detail(f"→ {rec_html}")
     mood_html = os.path.join(cfg.out_dir, "recommendations_by_mood.html")
     report.render_cluster_recommendations_html(
@@ -611,7 +629,8 @@ def main(argv=None) -> int:
     p.add_argument("--config", "-c", help="volitelný config.yaml s laděním parametrů")
     p.add_argument("--out", "-o", help="výstupní složka (default: output)")
     p.add_argument("--cache", help="složka cache (default: cache)")
-    p.add_argument("--shrinkage", type=float, help="přepiš shrinkage K")
+    p.add_argument("--shrinkage", type=float,
+                   help="přepiš shrinkage K (jen model.effect_model: marginal)")
     p.add_argument("--no-anilist", action="store_true", help="použij jen Jikan/MAL")
     p.add_argument("--no-jikan", action="store_true",
                    help="nouzový AniList-only režim (např. při výpadku Jikan "

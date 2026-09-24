@@ -20,13 +20,26 @@ log = logging.getLogger(__name__)
 @dataclass
 class ModelCfg:
     shrinkage_k: float = 8.0          # síla smrštění efektů k nule (vyšší = konzervativnější)
-    min_attr_count: float = 4.0       # min. efektivní počet titulů, aby atribut vstoupil
+    min_attr_count: float = 1.5       # min. efektivní počet titulů, aby atribut vstoupil.
+                                      # Malé vzorky smršťuje ridge (resp. n/(n+K)),
+                                      # práh jen odřízne úplné jednorázovky: při 4
+                                      # se zahodil horor (2 tituly, rezidua −0,82 a
+                                      # −1,40), takže vycházel „neutrální" (§9d #6)
     interaction_min_count: float = 8.0  # min. VÁŽENÁ podpora páru (Σ w_a·w_b·w_titulu)
     interaction_min_lift: float = 0.30  # práh na SMRŠTĚNÝ lift (n/(n+K), jako efekty);
                                         # když synergií prochází málo, sniž (např. 0.2)
     interaction_triples: bool = False   # EXPERIMENT: hierarchické synergie trojic
                                         # nad klastrovými signaturami (jádra nálad);
                                         # sdílí prahy interaction_min_count/_lift
+    effect_model: str = "ridge"       # "ridge" | "marginal" -- jak se počítají
+                                      # efekty atributů (HODNOCENI §9d, nález
+                                      # #3). ridge = regrese na centrované
+                                      # atributy: absence oblíbeného atributu
+                                      # sráží, korelované tagy se dělí o efekt.
+                                      # Páry a trojice jen v "marginal"
+    ridge_alpha: float = 60.0         # síla penalizace ridge (jen effect_model:
+                                      # ridge); obdoba shrinkage_k -- vyšší =
+                                      # konzervativnější
     n_clusters: int | None = None     # None = automaticky podle siluety (4–7)
     aggregate_franchises: bool = True # sequel/prequel → jeden vážený datový bod
     side_story_weight: float = 0.5    # příspěvek vedlejšího obsahu (OVA/speciál/
@@ -101,6 +114,21 @@ class RecommendCfg:
     w_cf: float = 0.8                 # graf podobnosti (MAL/AniList/Shikimori)
     w_user_cf: float = 0.6            # user-based CF (podobní uživatelé)
     w_quality: float = 0.3            # mírná preference vyššího komunitního skóre
+    w_select: float = 0.5             # model výběru (selection.py): „sáhnu po tom
+                                      # vůbec?" -- naučený z toho, co mezi
+                                      # populárními tituly v seznamu CHYBÍ.
+                                      # Zachytí, čemu se vyhýbám (horor, thriller,
+                                      # krimi), o čem model vkusu nemá data
+                                      # (HODNOCENI §9d.4). 0 = vypnuto
+    select_universe: int = 2000       # kolik nejpopulárnějších MAL titulů tvoří
+                                      # vesmír modelu výběru (cache ho pokrývá
+                                      # z 99 %; první běh stáhne 80 stránek žebříčku)
+    known_popularity: int = 500       # franšízy s dílem mezi tolika nejpopulárnějšími
+                                      # na MAL, které nemám v seznamu ani na PTW,
+                                      # jdou z „nových objevů" do sekce „znáš, ale
+                                      # nemáš v plánu" -- skoro jistě je znám a
+                                      # vědomě je přeskakuju. 0 = vypnuto
+    known_top: int = 10               # kolik titulů v sekci „znáš, ale nemáš v plánu"
     # prahy minimální síly hrany v grafu podobnosti -- slabé hrany (jednotky
     # hlasů, automatická doporučení) jsou spíš šum než skutečná podobnost
     min_mal_rec_votes: int = 5        # MAL: min. počet uživatelských hlasů

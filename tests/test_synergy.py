@@ -38,7 +38,7 @@ def _pair_fixture(pair_resid_value):
 
 
 def _fit_pair_model(pair_resid_value=1.0):
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=1.0,
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=1.0,
                    interaction_min_count=2.0, interaction_min_lift=0.05)
     m.titles, m._resid = _pair_fixture(pair_resid_value)
     m._fit_effects()
@@ -127,7 +127,7 @@ def _cluster_titles():
 
 
 def test_cluster_affinity_is_weighted_mean_of_residuals():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(
         _cluster_titles(), n_clusters=2)
     assert len(m.clusters) == 2
     by_id = {t.mal_id: t for t in m.titles}
@@ -259,7 +259,7 @@ def test_cluster_fit_zero_without_overlap_in_mood_space():
 
 
 def test_fit_clusters_stores_centroid_and_mood_space():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(
         _cluster_titles(), n_clusters=2)
     assert m.cluster_feat_keys                      # prostor nálady existuje
     for c in m.clusters:
@@ -270,7 +270,7 @@ def test_fit_clusters_stores_centroid_and_mood_space():
 
 
 def test_archetype_is_member_closest_to_centroid():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(
         _cluster_titles(), n_clusters=2)
     member_ids = {mid for c in m.clusters for mid, _t, _s in c.members}
     for c in m.clusters:
@@ -338,7 +338,7 @@ def _pure_cosine_pick(model, cluster):
 
 
 def test_archetype_skips_degenerate_sparse_members():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(
         _sparse_trap_titles(), n_clusters=2)
     trap = [c for c in m.clusters
             if any(t[1].startswith("Sparse") for t in c.members)]
@@ -369,7 +369,7 @@ def test_archetype_falls_back_to_best_available_when_all_sparse():
                      attrs={k: AttrValue("tag", 1.0, k)
                             for k in ("drama", "psychological", "tragedy")})
                for i in range(20)]
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(titles, n_clusters=2)
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(titles, n_clusters=2)
     for c in m.clusters:
         assert c.archetype and c.archetype[1]
 
@@ -409,7 +409,7 @@ def _triple_fixture():
 
 
 def _fit_triple_model():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=1.0,
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=1.0,
                    interaction_min_count=2.0, interaction_min_lift=0.05,
                    interaction_triples=True)
     m.titles, m._resid = _triple_fixture()
@@ -460,13 +460,13 @@ def test_triples_candidates_come_only_from_cluster_signatures():
 
 def test_triples_disabled_by_default_in_fit():
     titles = _cluster_titles()
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(titles, n_clusters=2)
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(titles, n_clusters=2)
     assert m.use_triples is False
     assert m.triples == []
 
 
 def test_fit_with_triples_enabled_runs_end_to_end():
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0,
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0,
                    interaction_min_count=2.0, interaction_min_lift=0.0001,
                    interaction_triples=True).fit(_cluster_titles(), n_clusters=2)
     # signatury mají jen po 2 klíčích (comedy+romance / drama+psychological)
@@ -490,7 +490,7 @@ def test_raw_resid_pred_scales_triple_by_candidate_weights():
 # ── report: obě znaménka synergie, bez "+-" bugu ─────────────────────────
 
 def test_model_html_shows_both_synergy_tables_and_affinity(tmp_path):
-    m = TasteModel(shrinkage_k=8.0, min_attr_count=2.0).fit(
+    m = TasteModel(effect_model="marginal", shrinkage_k=8.0, min_attr_count=2.0).fit(
         _cluster_titles(), n_clusters=2)
     m.interactions = [
         Interaction(a="comedy", b="romance", label="Comedy + Romance",

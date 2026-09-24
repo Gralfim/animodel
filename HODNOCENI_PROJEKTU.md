@@ -1278,6 +1278,326 @@ historie — proto ledger a log predikcí (kroky 3 a 4) běží první.
 
 ---
 
+## 9d. Proč doporučení odporují vkusu (2026-09-24)
+
+*Kolo 4. Podnět: top-3 žebříčku z 2026-09-16 — **Tokyo Revengers,
+Higurashi no Naku Koro ni, Death Note** — jde proti tomu, co o svém vkusu
+víš (silná romantická linka ≈ +1 ke známce, hodně akce odpuzuje, temný a
+ošklivý obsah taky) i proti tomu, co navrhují LLM. Rozbor offline nad cache
+a nad uloženým poolem snapshotu `00487_10d03f8ccdeb` (6 615 kandidátů), bez
+sítě a bez zásahu do kódu. Offline přestavěný model sedí s během (`scale`
+0,35, CV RMSE 0,9104). Nic z návrhů není implementované.*
+
+**Závěr v jedné větě:** nejde o jednu chybu, ale o čtyři naskládané
+mechanismy — graf podobnosti má kvůli normalizaci několikanásobnou váhu,
+jeho seedy se mezi devítkami vybírají abecedně, model vkusu strukturálně
+ředí nejsilnější preferenci (romantiku) a o temném obsahu nejsou v seznamu
+data. Testy (292/292) nic z toho nezachytí — nic nepadá, jen se špatně váží.
+
+### 9d.1 Rozpad top-3
+
+Vážená z-skóre složek kompozitu (přepočteno z uložených `z_params`):
+
+| titul | vkus | graf | user-CF | kvalita | kompozit |
+|---|---|---|---|---|---|
+| Tokyo Revengers | +3,08 | **+5,54** | +0,67 | +0,36 | 9,65 |
+| Higurashi no Naku Koro ni | +2,28 | **+4,95** | +1,91 | +0,39 | 9,52 |
+| Death Note | +2,15 | **+5,27** | +1,06 | +0,75 | 9,23 |
+
+Hlasy z grafu přicházejí u všech tří jen ze tří až čtyř seedů:
+
+| titul | hlasy | z toho | podle zdroje |
+|---|---|---|---|
+| Tokyo Revengers | 71,4 | Steins;Gate 30,9 · Boku dake ga Inai Machi 26,0 · S;G 0 14,6 | AniList 49,3 · MAL 20,9 · Shikimori 1,2 |
+| Higurashi | 45,4 | S;G 25,4 · S;G 0 10,7 · Boku dake 9,3 | AniList 34,4 · MAL 10,7 · Shikimori 0,4 |
+| Death Note | 58,4 | S;G 26,0 · Boku dake 18,3 · Bakuman 14,2 | AniList 31,9 · MAL 25,5 · Shikimori 1,1 |
+
+### 9d.2 Nálezy
+
+| # | nález | návrh | stav |
+|---|---|---|---|
+| **1** | **Graf podobnosti má kvůli normalizaci několikanásobnou váhu — VYSOKÁ.** Z-skóre složek se počítají přes celý pool (`recommend.py:491-494`). S user-CF má pool 6 615 titulů, hlas z grafu ale jen **399** z nich (6 108 přinesli jen senpai). `log1p(hlasy)` má proto průměr 0,134 a sd 0,599 a **jakýkoli** titul z grafu dostane +3,5 až +6 bodů, zatímco celá složka vkusu má sd 1. Graf tak funguje jako brána: **40/40** nových objevů má hlasy z grafu a tituly s nejlepší shodou s vkusem mimo graf se nahoru nedostanou (Kanon 2006 #110, Air #61, Summer Pockets #174). Efektivní síla `w_cf: 0.8` tak závisí na tom, kolik user-CF-only titulů je v poolu — se zapnutým user-CF se znásobí, aniž se váha změnila. | Parametry z-skóre počítat z **obsahového poolu** (graf + tag-search), ne z celého. Zvážit ořez \|z\| ≤ 2 nebo percentilovou normalizaci, aby žádná složka nemohla fungovat jako brána. Efektivní váhy kompozitu pak nezávisí na tom, jestli je user-CF zapnuté. | ✅ **OPRAVENO** 2026-09-24 — parametry vkusu, grafu a kvality z obsahového poolu, user-CF přes celý pool; ořez \|z\| nebyl potřeba (graf −1,3…+2,1, vkus ±3,3, kvalita ±2,4) |
+| **2** | **Seedy se mezi devítkami vybírají abecedně — VYSOKÁ.** `_seeds` (`recommend.py:167-168`) řadí jen podle známky, remízy rozhoduje pořadí exportu, a to je abecední. 30 desítek (po limitu 2 na franšízu) + prvních **10 ze 134 devítek**: 2.5-jigen no Ririsa … Bakuman., Boku dake ga Inai Machi, Boku no Kokoro no Yabai Yatsu. Clannad, Kimi ni Todoke, Fruits Basket, White Album 2, Plastic Memories ani Oregairu seedem nejsou nikdy. Dva ze čtyř seedů, které přivedly top-3, jsou tam **jen díky písmenu B**. Váha seedu `score − ū + 1` navíc nerozlišuje, *proč* titul máš v oblibě: Steins;Gate (komunita 9,07) má stejnou váhu jako Domestic na Kanojo, ač reziduum má +1,19 proti +2,40. | Řadit seedy podle **rezidua** (`model.residuals()`, o kolik víc se ti titul líbil, než čeká baseline), sekundárně podle známky. Top-40 podle rezidua: Domestic na Kanojo, Yuragi-sou, Hige wo Soru, Koi wa Ameagari, Russia-go Alya-san, 5-toubun … Boku dake (reziduum +0,57) a Bakuman vypadnou. **Nesimulováno** — nové seedy nemají rec graf v cache. K ověření navíc: normalizovat příspěvek seedu jeho celkovým objemem hlasů, ať populární seed (Steins;Gate: hrany se stovkami hlasů) nepřehlasuje romantické seedy, jejichž doporučení se rozptylují do méně známých titulů. | ✅ **OPRAVENO** 2026-09-24 — řazení (reziduum, známka, mal_id); normalizace objemem hlasů seedu otevřená |
+| **3** | **Součet marginálních průměrů ředí časté atributy a netrestá absenci — VYSOKÁ.** Efekt = smrštěný průměr rezidua titulů, které atribut **mají** (`taste.py:302-303`); titul bez atributu dostane 0. Efekt tak vychází ≈ (1 − p)·Δ, kde p je podíl atributu v seznamu. Romantika (p = 0,61): skutečný kontrast +0,40 bodu (romantika bez akce proti zbytku +0,50), efekt **+0,146**, po `scale` 0,35 **≈ +0,05 bodu**. Akce: skutečně −0,34, v modelu ≈ −0,08. Death Note za absenci romantiky neztratí nic. Součet 27–40 korelovaných tagů navíc nutí CV stáhnout `scale` na 0,35, čímž utlumí i ty skutečné signály — nejhlasitější jsou pak vzácné tagy s extrémním průměrem (Rehabilitation +0,44, Age Gap +0,40, Alternate Universe +0,32). U Death Note se sčítají tropy romantických dramat, které jsou tam okrajové (Unrequited Love, Yandere, Kuudere, Suicide, Amnesia). Pár **Psychological + Supernatural (+0,34)** stojí na Bakemonogatari, Nekomonogatari, Bunny Girl Senpai, Yofukashi no Uta a Fruits Basket — romantických příbězích s nadpřirozeným twistem. Zásluhu romantiky, kterou model neumí přiznat jí samotné, si připíše tahle dvojice a přenese ji na Death Note i Higurashi. | **Ridge regrese nad centrovanými atributy** (cíl zůstává reziduum, alpha ze CV, ~60). V grouped CV je stejně přesná (RMSE **0,9106** proti 0,9104, Spearman 0,416 proti 0,418), ale strukturu má rozumnou: nahoře široké rysy (TV, Male Protagonist, Light novel, Heterosexual, Romance), dole Episodic a **Action**; Rehabilitation +0,10 místo +0,44, Decouzon +0,06 místo +0,30. Na kandidátech spadne afinita Higurashi ze **110. na 652.** místo z 907, Death Note ze **133. na 607.** CV to nerozliší, protože měří jen na tvém seznamu, kde temné tituly nejsou. Podle §9c.2 se o struktuře rozhoduje **časovými okny** (`--backtest`), ne CV — tam ji ověřit před zavedením. Páry po zavedení přeměřit (část z nich byla jen zástupce utlumených singlů). | ✅ **OPRAVENO** 2026-09-24 — `model.effect_model: ridge` (default), α = 60; rozhodnuto backtestem, §9d.7 |
+| **4** | **AniList žánry se slučují binárně — STŘEDNÍ.** `build_attributes` přidává AniList žánry bezpodmínečně s vahou 1,0 (`attributes.py:208-209`). MAL u Tokyo Revengers romantiku nemá (Action, Drama; Delinquents, Time Travel), AniList ano — a model ji pak počítá stejně jako u Toradory. Pro zdroj, formát a dekádu už AniList slouží jen jako fallback, u žánrů ne. | Žánry **primárně z MAL**, AniList jen když MAL žádné nemá. Změřeno spolu s #5: CV RMSE 0,9104 → **0,9063** (v šumu, ale ne hůř). | ✅ **OPRAVENO** 2026-09-24 |
+| **5** | **„Script" zahrnuje lokalizaci — STŘEDNÍ.** `WRITER_POSITIONS` obsahuje `script` (`attributes.py:83-84`) a MAL pod ním vede i překladatele titulků/dabingu. „Writer: Decouzon, Mélanie" (+0,30, druhý největší kladný příspěvek u Tokyo Revengers) je francouzská lokalizace u Tokyo Revengers i Sakamichi no Apollon; podobně „Mattos, Sidney". Všech 30 staff efektů má n_eff 4–8, fakticky tedy kódují identitu jedné franšízy. Staff je zapnutý jen v `config.yaml` (default vypnuto). | Vyřadit `script` z `WRITER_POSITIONS` (hlavního scenáristu kryje `series composition`), nebo v `config.yaml` vrátit `include_staff: false`. | ✅ **OPRAVENO** 2026-09-24 — `script` vyřazen; varianta „Script jen bez Series Composition" zamítnuta (lokalizace prosakovala dál: Salva, Stocker 4×, Decouzon 2×) |
+| **6** | **`min_attr_count` zahazuje vzácnou negativní evidenci — STŘEDNÍ.** Atribut pod prahem 4 (`taste.py:300`) se vyřadí, místo aby ho jen smrštilo `n/(n+K)`. Horor máš u 2 titulů (Highschool of the Dead, Shinsekai yori; rezidua −0,82 a −1,40), efekt Horror je proto 0, tedy „neutrální" — a Higurashi nese žánr Horror. Totéž Delinquents u Tokyo Revengers (AniList rank 95). | Snížit práh na ~1,5–2 a nechat malé vzorky na smrštění. Pozor na vazbu z §9c.3: práh interaguje se sumou vah, takže změnu ověřit časovými okny. | ✅ **OPRAVENO** 2026-09-24 — práh 1,5 (i v `config.yaml`), rozhodnuto backtestem, §9d.7 |
+| **7** | **Chybí negativní evidence (selection bias) — VYSOKÁ, strukturální.** Tituly, kterým se vyhýbáš, v seznamu nejsou; dropnuté máš 2, obě bez známky. Model se tak nemá odkud naučit, že temný obsah vadí: co nezná, bere jako neutrální, a graf s kvalitou to pak vytáhnou nahoru. Tohle je rozdíl proti LLM, které tvé výslovné „ne temné, ne moc akce" použije jako pevné pravidlo. | Viz §9d.4 (populární tituly mimo seznam jako slabý negativní signál); jako doplněk explicitní averze v configu (horor, gore, delikventi) — jde proti principu „žádné ruční seznamy atributů", je to vědomé rozhodnutí. | 🟡 **ČÁSTEČNĚ** 2026-09-24 — model výběru + sekce „znáš, ale nemáš v plánu" (§9d.7); explicitní averze v configu k rozhodnutí |
+| **8** | **Osa náročnosti do řazení nevstupuje a míchá smutné s ošklivým — STŘEDNÍ.** `intensity_of` se používá jen pro popis nálad. Lexikon dává Tragedy +1,0 stejně jako Body Horror a Torture, přitom tragédie ti sedí (reziduum +0,18). | Rozdělit na dvě osy — emoční tíha (tragédie, tearjerker) a pochmurnost/brutalita (horor, gore, body horror) — a teprve tu druhou zvážit jako penalizaci. Vyžaduje druhý sloupec v `intensity.yaml`. | otevřené |
+| **9** | **User-CF je dnes převážně šum — STŘEDNÍ.** Senpai mají reziduální podobnost r = 0,17–0,28 a jejich špička jsou mainstreamové akční tituly (Gintama, Solo Leveling, Shingeki no Kyojin, Dr. Stone). Do kompozitu to přidává ±2 body (Higurashi +1,9) a hlavně nafukuje pool, čímž spouští #1. | Dokud historie neukáže přínos: `w_user_cf: 0`, nebo user-CF-only kandidáty nedávat do poolu kompozitu (CF report ponechat). | otevřené |
+| **10** | **„Proč:" míchá důvody se srážkami — NÍZKÁ, ale matoucí.** Karta ukazuje top-6 příspěvků podle absolutní hodnoty, záporné jen červeně (`report.py:385-390`). „Action + Drama" (−0,31) a „Action" u Tokyo Revengers jsou srážky, ne důvody. | Dva řádky: „Pro:" a „Proti:". | ✅ **OPRAVENO** 2026-09-24 — `report._why_html`, karta nese 12 příspěvků (`WHY_KEEP`), ukazuje max. 5 „Pro" a 3 „Proti" |
+
+Menší odchylky `config.yaml` od example, které se na výsledku podílejí:
+`include_staff: true` (#5), `use_user_cf: true` s agresivním nastavením
+(300 seedů × 1000 sledujících, pool 2000, překryv ≥ 200; #1, #9),
+`use_shikimori: true` (data odvozená z MAL, takže nejde o nezávislý hlas; na
+top-3 ale jen 0,4–1,2 z 45–71 hlasů) a `min_community: 6.0` místo 6,5.
+
+### 9d.3 Co by opravy změnily (what-if nad uloženým poolem)
+
+Počítáno nad 507 kandidáty z obsahových větví (+400 user-CF-only s nejlepší
+shodou s vkusem, obohaceno z cache bez sítě). Seedy podle rezidua (#2)
+simulovat nešlo. Pořadí ve variantách je bez sbalení franšíz do jedné
+karty (druhé díly jsou z top-10 vyškrtané ručně), u hlubších pozic se tedy
+může o pár míst lišit.
+
+| varianta | top-10 nových objevů (bez PTW) | Tokyo Rev. | Higurashi | Death Note |
+|---|---|---|---|---|
+| **dnes** (report) | Tokyo Revengers, Higurashi, Death Note, Charlotte, Koi to Yobu ni wa Kimochi Warui, Ano Natsu de Matteru, Kimi ga Nozomu Eien, Sakamichi no Apollon, Koi to Uso, Osananajimi ga Zettai ni Makenai Love Comedy | 1 | 2 | 3 |
+| z-skóre jen přes obsahový pool (#1) | Higurashi, Tokyo Revengers, Kimi ga Nozomu Eien, Death Note, Sakamichi no Apollon, Koi to Yobu…, Charlotte, Tantei wa Mou Shindeiru, Gosick, Ano Natsu de Matteru | 2 | 1 | 4 |
+| + ridge afinita, bez user-CF (#1, #3, #9) | Tokyo Revengers, Sakamichi no Apollon, Gosick, Charlotte, Kiznaiver, Ano Natsu de Matteru, Summertime Render, Taishou Otome Otogibanashi, Kimi ga Nozomu Eien, Given | 1 | >20 | >20 |
+| + žánry z MAL, bez staff (#4, #5), `w_cf` 0,8 | Sakamichi no Apollon, Ano Natsu de Matteru, Gosick, Tokyo Revengers, Charlotte, Summertime Render, Kimi ga Nozomu Eien, Koi to Uso, Cross Game, Kiznaiver | 4 | 73 | 39 |
+| totéž, `w_cf` 0,4 | Gosick, Sakamichi no Apollon, Ano Natsu de Matteru, Kimi ga Nozomu Eien, Cross Game, Hachimitsu to Clover II, ef: A Tale of Memories., Tokyo Revengers, Kiznaiver, Taishou Otome Otogibanashi | 8 | 112 | 59 |
+
+Poučení z tabulky:
+
+- **Samotná oprava normalizace (#1) nestačí** — mění poměr sil, ne obsah
+  grafu. Higurashi a Death Note padají až s ridge (#3), definitivně se
+  žánry z MAL (#4).
+- **Tokyo Revengers zůstává kolem 4.–8. místa** i po všech opravách: má
+  AniList tag Love Triangle (rank 73), dramatickou linku, cestování časem a
+  silný graf ze Steins;Gate. Pomůže oprava seedů (odpadne 26 hlasů z Boku
+  dake), úplně dolů ho ale dostane jen signál o averzi k akci/delikventům,
+  a ten v ohodnoceném seznamu není (#6, #7). Změřeně ho dostane dolů signál
+  vyhýbání z §9d.4 (#4 → #25).
+- Tagy neříkají, **kolik** titulu tvoří romantika — Tokyo Revengers a
+  Toradora mají obě „Romance" i „Love Triangle". To je strop obsahového
+  modelu nad tagy a důvod, proč LLM, která ví, o čem příběh *je*, radí jinak.
+
+### 9d.4 Nápad: populární tituly mimo seznam jako slabý negativní signál
+
+*Podnět uživatele (2026-09-24).* Titul s vysokým MAL skóre, který nemáš
+shlédnutý ani na PTW, skoro jistě znáš — a vyhýbáš se mu vědomě kvůli popisu
+nebo tagům. Je to přesně ta chybějící negativní evidence z nálezu #7:
+předvýběr, který export neobsahuje, se dá zčásti rekonstruovat z toho, **co
+v něm chybí**. V literatuře je to model výběru / expozice (implicitní
+zpětná vazba, „missing not at random") — druhá, na modelu vkusu nezávislá
+otázka: model vkusu odhaduje *jakou známku dáš, když to uvidíš*, tohle
+*jestli po tom vůbec sáhneš*.
+
+**Měření (offline, cache, bez sítě).** Cache pokrývá **100 %** top-1000 a
+**99 %** top-2000 MAL titulů podle popularity (počtu členů), takže vesmír je
+úplný.
+
+- **Vesmír:** top-2000 podle popularity, formát TV/Movie/ONA, premiéra
+  ≤ 2025, **jen první díly franšíz** (bez prequelu a parent story) — jinak
+  by jedna přeskočená franšíza hlasovala tolikrát, kolik má řad. Celkem
+  **1 198** titulů.
+- **Popisek:** „zájem" = franšízu máš v seznamu v jakémkoli stavu včetně PTW
+  (kořen z union-findu). Zájem má **263** (22 %).
+
+Zájem silně klesá s popularitou, takže u méně známých titulů je absence
+slabší důkaz:
+
+| popularita | 1–250 | 251–500 | 501–1000 | 1001–2000 |
+|---|---|---|---|---|
+| podíl se zájmem | 45 % | 34 % | 24 % | 11 % |
+
+Atributy s nejsilnějším vyhýbáním (smrštěné log-odds proti průměru):
+**Primarily Male Cast** (zájem 3 % z n=120), Organized Crime 0 %, Police 2 %,
+**Thriller 5 %**, **Horror 6 %**, Crime 6 %, Post-Apocalyptic 6 %, Cyberpunk,
+**Suspense 8 %**, Super Robot, Idol, Space, Historical, **Mystery 10 %**,
+Sports; z formátů ONA (0 z 30) a zdroj Game (0 z 28). Nejvyšší zájem: Harem
+52 %, Cohabitation, Ecchi, Female Harem, Nudity, Love Triangle, **Romance
+39 %** (n=500), Heterosexual, Unrequited Love. Vyhýbání tedy zachytí přesně
+to, co model vkusu kvůli chybějícím datům vidět nemůže (#6, #7).
+
+Naučitelnost — logistická regrese s L2 nad týmiž atributy + log(členů)
+jako kovariáta povědomí, 5 foldů po franšízách:
+
+| prediktor | CV AUC |
+|---|---|
+| jen popularita | 0,683 |
+| jen atributy | 0,852 |
+| **atributy + popularita** (C = 0,1) | **0,874** |
+
+**Časová kontrola:** model natrénovaný na stavu ze snapshotu 2026-07-28
+řadí 8 franšíz, které od té doby přibyly do seznamu nebo PTW, s **AUC 0,946**
+proti 0,781 u samotné popularity (medián pořadí ~30 z 943). Pozor: 8
+událostí je málo a skoro všechny spadají do konfundovaného období
+harémových maratonů (§9c.2) — Kore wa Zombie, Nazo no Kanojo X, Asterisk,
+Kaifuku Jutsushi… — takže číslo je spíš horní odhad.
+
+Pravděpodobnost zájmu (out-of-fold) u dnešní top-3 a pro srovnání:
+Higurashi **0,05**, Tokyo Revengers **0,20**, Death Note **0,22** —
+proti Horimiya 0,79, Kimi ni Todoke 0,77, Kaguya-sama 0,64, Kanon (2006)
+0,41, Air 0,40.
+
+**Dopad na žebříček** (nad variantou ridge + z-skóre z obsahového poolu +
+`w_cf` 0,4 z §9d.3; složka = z-skóre atributové části logitu, **bez**
+popularity):
+
+| varianta | Tokyo Rev. | Death Note | Higurashi | top-5 |
+|---|---|---|---|---|
+| bez signálu | 4 | 59 | 107 | Gosick, Sakamichi no Apollon, Kiznaiver, Tokyo Revengers, Taishou Otome |
+| + atributová složka, váha 0,5 | **25** | 106 | 203 | Gosick, Taishou Otome, Kiznaiver, Kimi ga Nozomu Eien, Sakamichi no Apollon |
+| + atributová 0,5 + srážka titulu 0,5·povědomí | 37 | 134 | 238 | Taishou Otome, Kimi ga Nozomu Eien, ef, Watari-kun no xx ga Houkai, HachiKuro II |
+
+Korelace atributové složky s ridge afinitou na obsahovém poolu je **0,68** —
+částečný překryv, ne duplikát.
+
+**Návrh.**
+
+1. **Atributová složka „výběr"** do kompozitu (`w_select` ~0,5): logistická
+   regrese nad populárními prvními díly franšíz, do kompozitu jen atributová
+   část logitu (popularita je povědomí, ne preference). V kartě jako důvod
+   „Proti: Primarily Male Cast — takovým titulům se vyhýbáš".
+2. **Srážku za konkrétní titul zatím ne.** Každý kandidát v „nových
+   objevech" je z definice mimo seznam i PTW, takže srážka podle povědomí
+   se rovná srážce za popularitu. Postihne i tituly, na které jen
+   ještě nedošlo — z top-5 vypadly Gosick a Sakamichi no Apollon. Lepší
+   varianta k rozhodnutí: populární přeskočené tituly nesrážet, ale ukázat
+   ve vlastní malé sekci „Znáš, ale nemáš v plánu — opravdu ne?".
+3. **Sjednotit s historií:** titul, který se ukázal mezi doporučeními a do
+   PTW nepřibyl, má povědomí ≈ 1 bez ohledu na popularitu. §9c.5 penalizaci
+   za ignorovaná doporučení vědomě odložila; tady na ni jde navázat stejným
+   mechanismem.
+
+**Rizika a podmínky.**
+
+- **Bublina:** výběr silně táhne k harému/ecchi (zájem 45–52 %), přičemž
+  model vkusu u nich vidí jen mírně kladné reziduum. Proto jen střední váha
+  a vysvětlení na kartě.
+- **Povědomí:** vesmír omezit na tituly s premiérou aspoň ~6 měsíců zpět
+  a popularitu nechat v modelu jako kovariátu, jinak se „neznám" splete
+  s „nechci".
+- **Náklady:** dnes je vesmír v cache hlavně díky user-CF poolu. Bez
+  user-CF (krok 9 v §9d.5) je potřeba jednorázově stáhnout
+  `top/anime?filter=bypopularity` (80 stránek po 25) + `/full` pro chybějící
+  tituly; pak jen přírůstky.
+- **Validace:** AUC měří, jestli jde výběr předpovědět, ne jestli doporučení
+  zlepší. O váze rozhodne až ledger v historii (§9c.5).
+
+### 9d.5 Plán
+
+Pořadí podle poměru dopad/cena; strukturální změny (#3, #6) rozhodnout
+časovými okny (`--backtest`), ne CV (§9c.2).
+
+| krok | co | nálezy | cena | stav |
+|---|---|---|---|---|
+| **1** | parametry z-skóre z obsahového poolu (ořez \|z\| nebyl potřeba) | #1 | řádky | ✅ hotovo |
+| **2** | seedy podle rezidua | #2 | řádek | ✅ hotovo |
+| **3** | žánry primárně z MAL, `script` pryč z `WRITER_POSITIONS` | #4, #5 | řádky | ✅ hotovo |
+| **4** | „Pro:" / „Proti:" v kartě | #10 | řádky | ✅ hotovo |
+| **5** | ridge místo součtu marginálních průměrů, přeměřit páry | #3 | den | ✅ hotovo (α = 60) |
+| **6** | nižší `min_attr_count` | #6 | řádek | ✅ hotovo (1,5) |
+| **7** | atributová složka „výběr" (vyhýbání se populárním titulům) do kompozitu; srážku za titul nahradit sekcí „znáš, ale nemáš v plánu" | #7, §9d.4 | den | ✅ hotovo |
+| **8** | dvě osy náročnosti, pochmurnost jako penalizace | #8 | den + revize lexikonu | otevřené |
+| **9** | user-CF z kompozitu, dokud historie neukáže přínos | #9 | config | k rozhodnutí |
+| **10** | explicitní averze v configu | #7 | řádky | k rozhodnutí (proti principu „žádné ruční seznamy") |
+
+### 9d.6 Co ukázal běh po krocích 1–4 (2026-09-24)
+
+Plný běh s `config.yaml` (user-CF zapnuté), výstup mimo `output/`, bez
+zápisu do historie. Testů 292 → **298**, všechny zelené.
+
+**Model.** CV RMSE **0,910 → 0,905** (baseline 0,951), `scale` beze změny
+0,35. Žánr Drama má po přechodu na MAL žánry efekt **+0,29** (n = 74) místo
++0,16 (n = 110) — volnější AniList „Drama" ho ředil. Počet nálad podle
+siluety klesl z 5 na **4**. Nejsilnější nálada je teď „Drama / Coming of
+Age / Romance" (134 titulů, afinita **+0,29**) místo dřívějšího „Slice of
+Life / Romance / Coming of Age" (+0,18).
+
+**Seedy.** Mezi seedy už není Steins;Gate (reziduum +1,19), Boku dake ga
+Inai Machi ani Bakuman. Hlasy z grafu u Tokyo Revengers klesly **71 → 15**,
+u Higurashi **45 → 11** (zbyl jen Steins;Gate 0).
+
+**Žebříček nových objevů** (top-40, shoda se starým 31/40):
+
+| | dřív | teď |
+|---|---|---|
+| Tokyo Revengers | 1 | 12 |
+| Higurashi no Naku Koro ni | 2 | 22 |
+| Death Note | 3 | mimo top-40 |
+| Kanon (2006) | ~110 v poolu | **18** |
+| top-5 | Tokyo Revengers, Higurashi, Death Note, Charlotte, Koi to Yobu… | **Kimi ga Nozomu Eien, Charlotte, Koi to Uso, Koi to Yobu…, ef: A Tale of Memories.** |
+
+Z top-40 vypadly mimo jiné Another, Death Note, Summertime Render a Mawaru
+Penguindrum. Přibyly Kanon (2006), Hachimitsu to Clover II, Myself;
+Yourself, Onegai☆Teacher, Shakugan no Shana, ale i **Madoka Magica (#40)**
+a Dr. Stone. Madoka přichází grafem z Bakemonogatari a Steins;Gate 0
+(39 hlasů) — přesně případ pro složku „výběr" z §9d.4 (odhad zájmu
+0,18–0,25). Graf má hlasy u 39 ze 40 titulů, bránou ale už není: nad
+uloženým poolem z 2026-09-16 dává složka grafu titulu mimo graf −1,0 a
+nejsilnějšímu titulu z grafu +1,7 bodu (dřív −0,2 a +6,0).
+
+Karta: „Pro" a „Proti" jsou oddělené, například Charlotte „Proti: P.A.
+Works, Original, Super Power", Tokyo Revengers už nemá „Action + Drama"
+mezi důvody.
+
+**Co zbývá:** vzácné tagy dál vedou tabulku efektů (Rehabilitation +0,44,
+Age Gap +0,40) a scenáristé s n ≈ 5 zůstávají (Akao Deko +0,31, Akasaka
+Aka −0,48) — to řeší až ridge (krok 5). Temné tituly přicházející grafem
+(Madoka, Higurashi) zachytí až složka „výběr" (krok 7).
+
+### 9d.7 Ridge a model výběru (kroky 5–7, 2026-09-24)
+
+**Backtest** (`backtest.run`, 4 disjunktní okna podle `my_finish_date`, řezy
+2025-09-09 / 2026-02-20 / 2026-05-17 / 2026-06-27; Spearman afinity vůči
+reziduu, 95% interval klastrovaný po franšízách; atributy už po krocích 1–4).
+`scale` naráželo u ridge na strop gridu 1,0, grid je proto rozšířený do 2,0
+(marginálního modelu se to netýká, optimum má 0,35):
+
+| varianta | `scale` | CV RMSE | Spearman vše | nové franšízy | pokračování | RMSE (debiased) | okna |
+|---|---|---|---|---|---|---|---|
+| marginal, min 4 (dosavadní) | 0,35 | 0,9046 | +0,424 [+0,28; +0,56] | +0,420 | +0,523 | 0,741 (0,739) | .57 .51 .47 .16 |
+| marginal, min 2 | 0,35 | 0,9065 | +0,457 | +0,454 | +0,547 | 0,736 | .67 .54 .46 .16 |
+| ridge α40, min 2 | 0,95 | 0,9061 | +0,459 | +0,441 | +0,494 | 0,731 | .57 .56 .48 .27 |
+| ridge α60, min 4 | 1,10 | 0,9068 | +0,447 | +0,444 | +0,473 | 0,734 | .55 .50 .53 .25 |
+| ridge α60, min 2 | 1,10 | 0,9056 | +0,465 | +0,459 | +0,476 | 0,730 | .56 .54 .52 .28 |
+| **ridge α60, min 1,5** | 1,10 | **0,9053** | **+0,465** [+0,34; +0,57] | +0,459 | +0,469 | **0,729** (0,726) | .57 .54 .51 .27 |
+| ridge α100, min 2 | 1,40 | 0,9058 | +0,467 | +0,470 | +0,465 | 0,730 | .53 .52 .54 .31 |
+| ridge α150, min 2 | 1,70 | 0,9064 | +0,466 | +0,477 | +0,454 | 0,731 | .53 .48 .56 .29 |
+
+Ridge s prahem 1,5–2 tvoří plošinu (α 40–150), rozdíly proti dosavadnímu
+modelu jsou menší než šířka intervalu, ale ve stejném směru ve všech
+souhrnných metrikách a ve 3 ze 4 oken; nejvíc se zlepšilo poslední,
+konfundované okno (.16 → .27). **Vybráno α = 60, `min_attr_count` 1,5**:
+nejnižší RMSE i CV RMSE a jako jediná varianta pustí do modelu horor (n_eff
+1,82). Marginální model zůstává jako `effect_model: marginal` (s páry a
+trojicemi) pro srovnání.
+
+**Model výběru** (`selection.py`, krok 7) podle §9d.4: vesmír z
+`get_top_popular` (Tenrai `top/anime?filter=bypopularity`, 80 stránek,
+cachuje se), obohacení bez staff, složka `w_select` 0,5 v kompozitu
+(z-skóre přes obsahový pool jako vkus), řádek „Obvykle nevybíráš" v kartě
+(jen žánry/témata/demografie/tagy — „2010s" v modelu zůstává, ale nic
+nevysvětlí). **Srážka za titul se nezavedla**; populární franšízy mimo
+seznam i PTW (`known_popularity` 500, rozhoduje nejpopulárnější díl) jdou
+místo toho do sekce „Znáš, ale nemáš v plánu". V produkčním běhu: 1 204
+titulů, zájem 22 %, CV AUC **0,865**, nejzápornější koeficienty Primarily
+Male Cast, Supernatural, Ojou-sama, Idol, Crime.
+
+**Plný běh** (`config.yaml`, user-CF zapnuté, zápis historie do kopie
+`history/` — snapshot se sloupcem `select` se uložil a ledger nad staršími
+snapshoty proběhl). Testů 298 → **313**.
+
+| | 2026-09-16 | po krocích 1–4 | po krocích 5–7 |
+|---|---|---|---|
+| Tokyo Revengers | #1 | #12 | pool #44, sekce „znáš" |
+| Higurashi no Naku Koro ni | #2 | #22 | pool #96, sekce „znáš" |
+| Death Note | #3 | mimo top-40 | pool #446 |
+| Kanon (2006) | pool #80 | #18 | #28 (pool #41) |
+
+(„pool #" = pořadí v celém poolu bez PTW, před sbalením franšíz a
+rozdělením do sekcí.)
+
+Nové objevy, top-10: Ano Natsu de Matteru, Koi to Uso, Kimi ga Nozomu Eien,
+Osananajimi ga Zettai ni Makenai Love Comedy, Sakamichi no Apollon, ef: A
+Tale of Memories., Koi to Yobu ni wa Kimochi Warui, Just Because!, Yumemiru
+Danshi wa Genjitsushugisha, Araburu Kisetsu no Otome-domo yo. Sekce „Znáš,
+ale nemáš v plánu": OreImo, Gosick, Charlotte, Isekai wa Smartphone, Shakugan
+no Shana, Ore Monogatari!!, Sankarea, Toki wo Kakeru Shoujo, Accel World,
+Madoka Magica. Karta teď ukazuje i absence — u Koi to Uso „Proti: bez Female
+Harem", u OreImo „Proti: bez Romance, bez Drama".
+
+**Co zbývá otevřené:** kroky 8–10 z §9d.5 (dvě osy náročnosti, user-CF
+z kompozitu, explicitní averze), normalizace objemem hlasů seedu (#2),
+propojení modelu výběru s historií („doporučeno a do PTW nepřidáno" ⇒
+povědomí ≈ 1, §9d.4 bod 3) a ověření váhy `w_select` až na ledgeru historie.
+
+---
+
 ## 10. Co bych neměnil
 
 - **Reziduální cíl + zdůvodnění restrikce rozsahu.** Nosná myšlenka, správně

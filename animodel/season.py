@@ -23,7 +23,7 @@ import datetime as _dt
 import logging
 
 from .enrich import _is_side_content
-from .recommend import Recommendation, cluster_fit
+from .recommend import WHY_KEEP, Recommendation, cluster_fit
 from .series import build_series_groups
 
 log = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ def _make_rec(model, en, ptw: bool, airing: dict | None,
         affinity=model.affinity(en.attrs), cluster_fit=cfit,
         cf_signal=0.0,
         composite=0.0, ptw=ptw, cluster_name=cname,
-        why=contribs[:6], cf_seeds=[], synopsis=en.synopsis,
+        why=contribs[:WHY_KEEP], cf_seeds=[], synopsis=en.synopsis,
         sources=["season"],
         finale_date=finale_date(airing),
         broadcast=(airing or {}).get("broadcast"),

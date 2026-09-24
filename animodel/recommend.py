@@ -49,6 +49,11 @@ from .series import build_roots, related_ids
 
 log = logging.getLogger(__name__)
 
+#: kolik příspěvků rozpadu predikce si karta nese (seřazené podle absolutní
+#: hodnoty). Report z nich ukazuje zvlášť kladné („Pro") a záporné („Proti")
+#: -- při dřívějších 6 často jedna strana úplně chyběla.
+WHY_KEEP = 12
+
 
 @dataclass
 class Recommendation:
@@ -85,6 +90,13 @@ class Recommendation:
                                       # franšíza, viz Recommender._franchise_views)
     entry_note: str | None = None     # „začni od: X" u pokračování, jehož
                                       # předchozí díl jsi neviděl
+    select: float = 0.0               # model výběru (selection.py): atributová
+                                      # část logitu „sáhnu po tom vůbec?"
+    avoided: list = field(default_factory=list)
+                                      # labely atributů, kterým se obvykle
+                                      # vyhýbám -- jen když výběr titul sráží
+    popularity: int | None = None     # pořadí na MAL podle počtu členů
+                                      # (sekce „znáš, ale nemáš v plánu")
     prequel_score: float = 0.0        # má známka předchozí řady (řazení sekce
                                       # „pokračování tvých sérií"). Dřív se to
                                       # na dataclass přišpendlovalo dynamicky
@@ -114,6 +126,10 @@ class RecommendResult:
                                                     # pokračování rozjetých sérií
     ptw_ranked: list = field(default_factory=list)  # „z tvého PTW" podle kompozitu
     continuations: list = field(default_factory=list)  # pokračování mých franšíz
+    known: list = field(default_factory=list)       # populární, mimo seznam i PTW:
+                                                    # „znáš, ale nemáš v plánu"
+    selection: object = None                        # selection.SelectionModel
+                                                    # (nebo None) -- pro výpis
     roots: dict = field(default_factory=dict)       # {mal_id: kořen franšízy}
 
     def __iter__(self):
@@ -162,10 +178,22 @@ class Recommender:
         (`seeds_per_franchise`): bez něj pětiřadá oblíbená franšíza sebere
         5 z max_seeds slotů a její (vzájemně skoro identické) rec grafy
         hlasují 5x -- kandidáti podobní franšíze pak dostávají násobný CF
-        signál na úkor rozmanitosti. Nejlépe hodnocené řady mají přednost.
+        signál na úkor rozmanitosti.
+
+        Pořadí = REZIDUUM (o kolik víc se mi titul líbil, než čeká baseline
+        z komunity), pak známka, pak mal_id. Dřív se řadilo jen podle
+        známky a remízy rozhodovalo pořadí exportu, tedy ABECEDA: ze 134
+        devítek se seedem stalo prvních 10 od „2.5-jigen" po „Boku no
+        Kokoro" a dva ze čtyř seedů, které přivedly tehdejší top-3, tam byly
+        jen díky písmenu B (HODNOCENI_PROJEKTU.md §9d, nález #2). Reziduum
+        navíc odliší osobní oblibu od obecně uznávané kvality: Steins;Gate
+        (komunita 9,07) má při stejné desítce reziduum +1,19, Domestic na
+        Kanojo +2,40.
         """
+        resid = self.model.residuals()
         cand = [t for t in titles if t.user_score >= self.rc.high_score]
-        cand.sort(key=lambda t: -t.user_score)
+        cand.sort(key=lambda t: (-resid.get(t.mal_id, 0.0), -t.user_score,
+                                 t.mal_id))
         cap = self.rc.seeds_per_franchise
         if not cap:
             return cand[: self.rc.max_seeds]
@@ -394,7 +422,7 @@ class Recommender:
             entry, current = enriched_all[nxt], nxt
 
     def _franchise_views(self, recs: list, enriched: dict,
-                         watched_ids: set[int]) -> dict:
+                         watched_ids: set[int], watched_enr: dict) -> dict:
         """
         Jeden průchod seskupením franšíz nad hotovým poolem:
 
@@ -406,14 +434,16 @@ class Recommender:
             je hlídá sám (všechna 4 v dnešním top-100 měl v PTW), v globálním
             žebříčku jen zabírala místa objevům;
           * **„z tvého PTW" zvlášť** -- PTW tvořilo 15-16 ze 40 míst přehledu;
-          * u mid-franchise sequelů štítek „začni od".
+          * u mid-franchise sequelů štítek „začni od";
+          * **„znáš, ale nemáš v plánu"** -- franšízy s dílem mezi
+            `known_popularity` nejpopulárnějšími na MAL. Mimo seznam i PTW je
+            skoro jistě znám a vědomě je přeskakuju (§9d.4), takže mezi
+            objevy jen zabírají místo; nesrážejí se, jen mají vlastní sekci.
 
         Relace se berou z cache (kandidáti + shlédnuté tituly); referencované
         tituly vstupují jen jako uzly union-findu, neobohacují se.
         """
         watched = sorted(watched_ids)
-        watched_enr = (self.enr.enrich_ids(watched, show_progress=False)
-                       if watched else {})
         enriched_all = {**watched_enr, **enriched}
         rel = self.enr.relations_data(enriched_all)
         roots = build_roots([r.mal_id for r in recs] + watched, rel)
@@ -421,8 +451,11 @@ class Recommender:
 
         by_root: dict = {}
         collapsed: list = []
+        best_pop: dict = {}                 # {kořen: nejlepší pořadí popularity}
         for r in recs:                      # pool je seřazený podle kompozitu
             root = roots.get(r.mal_id, r.mal_id)
+            if r.popularity:
+                best_pop[root] = min(best_pop.get(root, r.popularity), r.popularity)
             keeper = by_root.get(root)
             if keeper is not None:
                 keeper.franchise_members.append(r.title)
@@ -433,13 +466,47 @@ class Recommender:
 
         cont_ids = {r.mal_id for r in collapsed
                     if roots.get(r.mal_id, r.mal_id) in watched_roots}
+        rest = [r for r in collapsed if not r.ptw and r.mal_id not in cont_ids]
+        limit = self.rc.known_popularity
+        known_ids = {r.mal_id for r in rest
+                     if limit and best_pop.get(roots.get(r.mal_id, r.mal_id),
+                                               limit + 1) <= limit}
         return {
             "roots": roots,
             "continuations": [r for r in collapsed if r.mal_id in cont_ids],
             "ptw_ranked": [r for r in collapsed if r.ptw][: self.rc.ptw_top],
-            "discovery": [r for r in collapsed
-                          if not r.ptw and r.mal_id not in cont_ids][: self.rc.top_n],
+            "known": [r for r in rest if r.mal_id in known_ids][: self.rc.known_top],
+            "discovery": [r for r in rest if r.mal_id not in known_ids][: self.rc.top_n],
         }
+
+    def _selection(self, enriched: dict, watched_enr: dict, list_ids: set[int],
+                   show_progress: bool):
+        """
+        Model výběru (selection.py) nad `select_universe` nejpopulárnějšími
+        tituly MAL. Tituly, které už jsou obohacené (kandidáti, shlédnuté), se
+        znovu nenačítají; zbytek se obohatí BEZ staff (model ho nepoužívá a
+        Jikan staff by stál request na titul). Potřebuje Jikan (seznam
+        popularity + počet členů) -- v --no-jikan režimu se přeskočí.
+        """
+        if not (self.rc.w_select and self.rc.select_universe and self.enr.jikan):
+            return None
+        from .selection import MAIN_FORMATS, fit_selection
+        top = self.enr.jikan.get_top_popular(self.rc.select_universe)
+        ids = [d["mal_id"] for d in top
+               if d.get("mal_id") and d.get("type") in MAIN_FORMATS]
+        have = {**watched_enr, **enriched}
+        missing = [m for m in ids if m not in have]
+        extra = (self.enr.enrich_ids(missing, show_progress=show_progress,
+                                     with_staff=False) if missing else {})
+        universe = {m: have.get(m) or extra[m] for m in ids
+                    if m in have or m in extra}
+        rel = self.enr.relations_data({**watched_enr, **universe})
+        try:
+            return fit_selection(universe, list_ids, rel)
+        except Exception:
+            # doplňková složka nesmí shodit doporučení
+            log.exception("model výběru selhal -- doporučení pokračují bez něj")
+            return None
 
     def recommend(self, all_titles: list[Title], ptw_ids: set[int],
                   watched_ids: set[int], show_progress=True,
@@ -462,6 +529,12 @@ class Recommender:
         # 2) obohať kandidáty (atributy + komunitní skóre + synopse)
         cand_ids = list(cand_meta.keys())
         enriched = self.enr.enrich_ids(cand_ids, show_progress=show_progress)
+        # shlédnuté tituly jednou -- potřebují je franšízové pohledy i model výběru
+        watched_enr = (self.enr.enrich_ids(sorted(watched_ids), show_progress=False)
+                       if watched_ids else {})
+        # 2b) model výběru: sáhnu po tom vůbec? (selection.py, §9d.4)
+        selection = self._selection(enriched, watched_enr,
+                                    watched_ids | ptw_ids, show_progress)
 
         # 3) spočti surové metriky
         rows = []
@@ -479,27 +552,51 @@ class Recommender:
             raw_resid = self.model.affinity(en.attrs)
             cfit, cname = self._cluster_fit(en.attrs)
             taste_fit = raw_resid + self.rc.cluster_fit_weight * cfit
+            sel = selection.score(en.attrs) if selection else 0.0
             rows.append((mid, en, meta, pred, lo, hi, contribs, taste_fit, cname,
-                         raw_resid, cfit))
+                         raw_resid, cfit, sel))
 
         if not rows:
             return RecommendResult(recs=[], senpai=senpai, cf_raw=cf_raw)
 
         # 4) z-skóry pro kompozit -- item-CF přes log1p (šikmé rozdělení:
         # kandidát doporučený mnoha seedy najednou by jinak dostal z-skóre
-        # 5-15 a přebil všechny ostatní složky, viz analýza 2026-07)
-        z_taste = _z([r[7] for r in rows])
-        z_item = _z([math.log1p(r[2]["item_votes"]) for r in rows])
+        # 5-15 a přebil všechny ostatní složky, viz analýza 2026-07).
+        #
+        # Parametry (průměr, sd) vkusu, grafu a kvality se berou z OBSAHOVÉHO
+        # poolu (kandidáti z grafu podobnosti nebo tag-search), ne z celého.
+        # Celý pool se se zapnutým user-CF nafoukne o tisíce titulů, které
+        # přinesli jen senpai a které mají v grafu nulu: na reálných datech
+        # 6 108 z 6 615, takže log-hlasy grafu měly průměr 0,13 a sd 0,60 a
+        # KAŽDÝ titul z grafu dostal +3,5 až +6 bodů. Graf tak fungoval jako
+        # brána -- 40/40 nových objevů z grafu, Kanon (2006) s nejlepší shodou
+        # s vkusem až #110 (HODNOCENI_PROJEKTU.md §9d, nález #1). Obsahový
+        # pool existuje vždy a jeho složení na user-CF nezávisí, takže váhy
+        # w_* znamenají totéž se zapnutým i vypnutým user-CF.
+        #
+        # User-CF složka se normalizuje přes celý pool: je to jediná složka,
+        # jejíž hodnoty nese hlavně user-CF větev, a nad obsahovým poolem by
+        # mohla vyjít konstantní (senpai nemusí znát žádného kandidáta z grafu).
+        #
+        # Ořez |z| není potřeba: nad obsahovým poolem vychází graf v rozsahu
+        # −1,3 až +2,1, vkus ±3,3 a kvalita ±2,4.
+        content = [r for r in rows if r[2]["sources"] - {"user-CF"}] or rows
+        z_taste = _z([r[7] for r in content])
+        z_item = _z([math.log1p(r[2]["item_votes"]) for r in content])
         z_user = _z([r[2]["user_votes"] for r in rows])
-        z_q = _z([(r[1].community or self.model.c_mean) for r in rows])
+        z_q = _z([(r[1].community or self.model.c_mean) for r in content])
+        # model výběru: stejné pravidlo jako vkus (obsahový pool); bez modelu
+        # jsou všechny hodnoty 0 a složka se vykrátí
+        z_sel = _z([r[11] for r in content])
 
         recs = []
         for (mid, en, meta, pred, lo, hi, contribs, taste_fit, cname,
-             raw_resid, cfit) in rows:
+             raw_resid, cfit, sel) in rows:
             comp = (self.rc.w_taste_fit * z_taste(taste_fit)
                     + self.rc.w_cf * z_item(math.log1p(meta["item_votes"]))
                     + self.rc.w_user_cf * z_user(meta["user_votes"])
-                    + self.rc.w_quality * z_q(en.community or self.model.c_mean))
+                    + self.rc.w_quality * z_q(en.community or self.model.c_mean)
+                    + self.rc.w_select * z_sel(sel))
             recs.append(Recommendation(
                 mal_id=mid, title=en.title, title_en=en.title_en,
                 community=en.community, pred=pred, pred_lo=lo, pred_hi=hi,
@@ -507,20 +604,24 @@ class Recommender:
                 user_cf_signal=meta["user_votes"], composite=comp,
                 affinity=raw_resid, cluster_fit=cfit,
                 ptw=(mid in ptw_ids), cluster_name=cname,
-                why=contribs[:6], cf_seeds=meta["cf_seeds"][:5],
+                why=contribs[:WHY_KEEP], cf_seeds=meta["cf_seeds"][:5],
                 synopsis=en.synopsis, sources=sorted(meta["sources"]),
+                select=sel,
+                avoided=(selection.avoided(en.attrs)
+                         if selection and z_sel(sel) < 0 else []),
+                popularity=(en.jikan or {}).get("popularity") or None,
             ))
 
         recs.sort(key=lambda r: -r.composite)
         top = self.rc.top_n if limit == -1 else limit
         z_params = {name: [z.mean, z.sd] for name, z in (
             ("taste_fit", z_taste), ("item_cf", z_item),
-            ("user_cf", z_user), ("quality", z_q))}
+            ("user_cf", z_user), ("quality", z_q), ("select", z_sel))}
         # pohledy se počítají nad CELÝM poolem, ne nad ořezem
-        views = self._franchise_views(recs, enriched, watched_ids)
+        views = self._franchise_views(recs, enriched, watched_ids, watched_enr)
         return RecommendResult(recs=recs if top is None else recs[:top],
                                senpai=senpai, cf_raw=cf_raw, z_params=z_params,
-                               **views)
+                               selection=selection, **views)
 
 
 def cluster_fit(model, attrs: dict[str, AttrValue]) -> tuple[float, str]:

@@ -68,13 +68,27 @@ def test_anilist_format_labels_keep_acronyms_and_source_other_is_filtered():
     assert attrs2["tv_short"].label == "TV Short"
 
 
-def test_attributes_anilist_genres_merge_with_mal_genres_without_duplication():
+def test_attributes_mal_genres_win_anilist_genres_are_not_added():
+    """Žánry primárně z MAL (HODNOCENI §9d, nález #4): AniList je volnější
+    a binárně sloučený přebíjel MAL -- Tokyo Revengers (MAL: Action, Drama)
+    dostal z AniListu Romance s vahou 1,0 jako Toradora."""
     jikan = {"genres": [{"name": "Comedy"}], "themes": [], "demographics": [],
              "source": "", "type": "", "year": None, "studios": []}
     attrs = build_attributes(jikan, _media(1, 100), anilist_min_rank=30)
-    # Comedy z obou zdrojů = jeden atribut; Drama jen z AniListu se doplní
     assert attrs["comedy"].weight == 1.0
-    assert "drama" in attrs
+    assert "drama" not in attrs                  # jen na AniListu -> nepřidá se
+    assert "tearjerker" in attrs                 # AniList TAGY zůstávají
+
+
+def test_attributes_anilist_genres_fill_in_when_mal_has_none():
+    """Titul, který na MAL žánry nemá (nebo Jikan pro něj selhal), bere
+    žánry z AniListu -- stejná fallback logika jako zdroj/formát/dekáda."""
+    jikan = {"genres": [], "themes": [{"name": "School"}], "demographics": [],
+             "source": "", "type": "", "year": None, "studios": []}
+    attrs = build_attributes(jikan, _media(1, 100), anilist_min_rank=30)
+    assert attrs["comedy"].category == "genre"
+    assert attrs["drama"].category == "genre"
+    assert "school" in attrs
 
 
 # ── relations adaptér ────────────────────────────────────────────────────
@@ -167,6 +181,9 @@ class _StubModel:
     def top_effects(self, n=40, sign=1):
         return []
 
+    def residuals(self):
+        return {}
+
 
 class _StubEnricher:
     jikan = None
@@ -207,6 +224,19 @@ def test_staff_attribute_key_ignores_name_order_but_label_stays_readable():
     # popisek ale zůstává tak, jak ho zdroj dodal
     assert list(a.values())[0].label == "Director: Mizushima, Tsutomu"
     assert list(b.values())[0].label == "Director: Tsutomu Mizushima"
+
+
+def test_bare_script_credit_is_not_a_writer():
+    """MAL pod holým "Script" vede i lokalizaci -- francouzská překladatelka
+    u Tokyo Revengers měla efekt +0,30 (HODNOCENI §9d, nález #5). Scenáristu
+    série nese "Series Composition"."""
+    from animodel.attributes import build_attributes
+
+    staff = [{"person": {"name": "Decouzon, Mélanie"}, "positions": ["Script"]},
+             {"person": {"name": "Mutou, Yasuyuki"},
+              "positions": ["Series Composition"]}]
+    attrs = build_attributes(None, None, staff=staff)
+    assert set(attrs) == {"writer_mutou_yasuyuki"}
 
 
 def test_anilist_staff_adapter_maps_roles_to_jikan_shape():

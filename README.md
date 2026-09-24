@@ -65,7 +65,8 @@ selže jen pro některé tituly, doplní se z AniListu automaticky.
 Tvůj seznam má **silně omezený rozsah známek** — skoro nic pod 7, protože už při
 výběru do PTW děláš náročný předvýběr. Lineární regrese na surových známkách tu
 nemá co vysvětlovat: tvá známka ≈ komunita + skoro konstantní posun. (To je důvod,
-proč předchozí pokus s Ridge regresí nedával přesvědčivé výsledky.)
+proč předchozí pokus s Ridge regresí na surových známkách nedával přesvědčivé
+výsledky. Na *odchylce* od komunity — viz níž — naopak ridge funguje nejlépe.)
 
 animodel proto **necílí na známku, ale na odchylku**:
 
@@ -75,16 +76,28 @@ animodel proto **necílí na známku, ale na odchylku**:
    hodnotí vysoko i komunita).
 2. **Cíl = afinita.** Co po odečtení baseline zbude. To je tvůj osobní podpis nad
    rámec toho, co by čekal kdokoli.
-3. **Efekty atributů.** Pro každý atribut empiricko-bayesovsky **smrštěný** vážený
-   průměr afinity: `efekt = (n/(n+K))·průměr`. Malé vzorky se táhnou k nule, takže
-   tě neošálí žánr viděný 2×. Vedle efektu se počítá i `Δ komunita` = intuitivní
-   „o kolik výš než dav to hodnotíš".
-4. **Interakce.** Dvojice atributů, kde se afinita liší od součtu jednotlivých
-   efektů — oběma směry: „sladké tečky" i kombinace, které si nesedí. Lift je
-   smrštěný stejně jako efekty a vážený přítomností atributů; obojí vstupuje
-   do predikce i řazení doporučení. Volitelně (`model.interaction_triples`)
-   i **trojice nad jádry nálad**: kandidáti z klastrových signatur,
-   hierarchický lift = zbytek nad singly a páry (žádné dvojité počítání).
+3. **Efekty atributů.** **Ridge regrese** afinity na **centrované** atributy
+   (`model.effect_model: ridge`, penalizace `ridge_alpha`): každý efekt platí
+   „při ostatním stejném". Dvě věci, které dřívější průměry neuměly:
+   - **chybějící oblíbený atribut sráží** — titul bez romantiky dostane
+     `−β·μ` (μ = jak častá je romantika v seznamu). Průměr afinity titulů
+     *s* atributem vycházel jen ≈ (1 − p)·rozdíl, takže romantika (61 %
+     seznamu) měla po kalibraci vliv ~0,05 bodu a Death Note za to, že ji
+     nemá, neztratil nic;
+   - **zastupitelné tagy se dělí o jeden efekt** místo aby se sčítaly
+     (Romance + Heterosexual + Love Triangle…), a řídké atributy se
+     smršťují k nule samy.
+   Vedle efektu se počítá i `Δ komunita` = intuitivní „o kolik výš než dav to
+   hodnotíš". Rozpad predikce v kartě ukazuje i absence („bez Romance").
+   Backtest na 4 časových oknech: Spearman +0,424 → **+0,465**, RMSE 0,741 →
+   **0,729** (HODNOCENI §9d.7).
+4. **Interakce** (jen `effect_model: marginal`, dřívější model). Tam se efekt
+   počítá jako smrštěný průměr `(n/(n+K))·průměr` a navíc dvojice atributů,
+   kde se afinita liší od součtu jednotlivých efektů; volitelně
+   (`model.interaction_triples`) i trojice nad jádry nálad. V ridge režimu
+   páry nejsou — část z nich byla jen zástupce utlumených singlů (pár
+   „Psychological + Supernatural" nesl zásluhu romantiky z Monogatari a
+   Bunny Girl Senpai a přenášel ji na Death Note).
 5. **Nálady (módy).** KMeans na normalizovaných atributových vektorech; počet
    klastrů se volí podle siluety. Kandidát se k náladě přiřazuje **váženým
    kosinem proti celému těžišti** klastru, a jen v prostoru nálady
@@ -108,8 +121,8 @@ animodel proto **necílí na známku, ale na odchylku**:
    prozradí testu její identitu přes studio, staff a řídké tagy — 95 ze 103
    franšíz se dřív rozpadlo do víc foldů) a sčítají se přes **tři zamíchání**,
    ať čísla nekolísají podle seedu. Afinita se navíc **centruje** tréninkovým
-   průměrem: součet smrštěných efektů centrovaný není, takže predikovaná
-   známka vycházela systematicky nadsazená.
+   průměrem (u ridge je centrovaná z konstrukce). Škála může být i nad 1 —
+   ridge koeficienty jsou smrštěné penalizací a CV jim amplitudu vrací.
    Trojice (jsou-li zapnuté) mají **vlastní škálu** — jsou jiný
    řád důkazů než singly a páry (řidší podpora, kandidáti z klastrových
    signatur), tak se i kalibrují zvlášť: společný grid přes `(s, s₃)`.
@@ -126,8 +139,15 @@ studia, zdroj, dekáda, formát, demografie) se **objevují samy z dat**.
 tag „Drama" = jeden atribut), aby se stejný koncept nezapočítal víckrát. Totéž
 platí pro osoby: klíč režiséra/scenáristy se skládá ze seřazených slov jména,
 takže „Mizushima, Tsutomu" (Jikan) a „Tsutomu Mizushima" (AniList) jsou jeden
-atribut. Země původu vstupuje jen když **není** japonská (JP tvoří ~95 %
-každého seznamu, jako atribut by to byla konstanta).
+atribut. Za scenáristu se nepočítá holé „Script" — MAL pod ním vede i
+lokalizaci (překladatele titulků). Země původu vstupuje jen když **není**
+japonská (JP tvoří ~95 % každého seznamu, jako atribut by to byla konstanta).
+
+**Žánry se berou z MAL**, AniList je doplní jen tam, kde MAL žádné nemá (jako
+zdroj, formát a dekádu). AniList žánry jsou volnější a při binárním sloučení
+MAL přebíjely: Tokyo Revengers má na MAL Action + Drama, AniList přidal
+Romance a model ji počítal stejně jako u Toradory. AniList **tagy** (s vahou
+podle ranku) zůstávají.
 
 Tichý selhací mód téhle vrstvy je „dva klíče pro jeden koncept": nikde to
 nespadne, jen se evidence rozdělí na dvě poloviny, obě se silněji smrští
@@ -180,7 +200,10 @@ náročnosti. V HTML reportech nesou příznak a přepínač vpravo nahoře
 Dvě nezávislé větve, sjednocené a deduplikované:
 
 - **Atributová / obsahová** — z tvých oblíbených seedů se tahá MAL + AniList
-  „recommendations" graf (item-based CF), volitelně i Shikimori `/similar`
+  „recommendations" graf (item-based CF). Seedy (známka ≥ `high_score`, max.
+  `max_seeds`) se vybírají podle **rezidua** — o kolik víc se ti titul líbil,
+  než čeká baseline z komunity — ne jen podle známky: remízy mezi desítkami
+  a devítkami dřív rozhodovalo abecední pořadí exportu. Volitelně i Shikimori `/similar`
   (`enrich.use_shikimori` v configu, default vypnuto — stojí +1 request na seed
   a přináší hlavně *nové kandidáty*, pořadí ovlivní jen okrajově: endpoint
   vrací prostý seznam bez skóre podobnosti, takže se váží pozicí), a navíc
@@ -206,7 +229,7 @@ Dvě nezávislé větve, sjednocené a deduplikované:
   jinou přezdívku, přidej ji do `recommend.user_cf_exclude_users`) — import
   vlastního seznamu má podobnost 1.00 a doporučil by ti jen to, co už máš.
 
-Každý kandidát se skóruje kompozitem (sčítají se z-skóry čtyř oddělených
+Každý kandidát se skóruje kompozitem (sčítají se z-skóry pěti oddělených
 složek):
 
 ```
@@ -214,10 +237,29 @@ composite = w_taste_fit · afinita+shoda_s_náladou
           + w_cf        · „doporučili to tvé oblíbené" (graf, log-tlumené hlasy)
           + w_user_cf   · user-based CF (podobní uživatelé)
           + w_quality   · komunitní skóre
+          + w_select    · „sáhneš po tom vůbec?" (model výběru)
 ```
+
+**Model výběru** (`selection.py`) doplňuje, co model vkusu z principu vidět
+nemůže: čemu se vyhýbáš. Model vkusu se učí jen z toho, co máš shlédnuté, a
+žánrům, kterým se vyhýbáš, v seznamu skoro nic neodpovídá — bere je proto
+jako neutrální. Model výběru se učí z **top-2000 MAL titulů podle
+popularity** (jen první díly franšíz, aspoň půl roku staré): populární
+titul, který nemáš ani na PTW, skoro jistě znáš a vědomě ho přeskakuješ.
+Logistická regrese nad atributy s popularitou jako kovariátou povědomí (méně
+známý titul chybí spíš proto, že o něm nevíš); do kompozitu jde jen
+atributová část. Na reálném seznamu CV AUC 0,874 a nejvíc se vyhýbá
+Primarily Male Cast, Organized Crime, Police, Thriller, Horror a Crime.
+Karta titulu, který model výběru sráží, ukazuje řádek **„Obvykle
+nevybíráš: …"**.
 
 Graf podobnosti a user-CF mají **každý vlastní z-skóre a váhu** — ve sdíleném
 kbelíku by šikmé rozdělení hlasů grafu user-CF utopilo a přebilo i model vkusu.
+Průměr a rozptyl pro z-skóre vkusu, grafu a kvality se počítají z
+**obsahového poolu** (kandidáti z grafu a tag-search), ne z celého: user-CF
+do poolu přidá tisíce titulů s nulou v grafu, rozptyl grafu se tím zhroutí a
+každý titul z grafu dostane pár bodů navíc jen za to, že v grafu je. Váhy
+`w_*` tak znamenají totéž se zapnutým i vypnutým user-CF.
 Slabé hrany grafu (`min_mal_rec_votes`, `min_anilist_rec_rating`) se zahazují:
 jednotky hlasů jsou šum, skutečně podobné série mívají hlasů desítky.
 
@@ -228,8 +270,12 @@ počítá zvlášť jen pro zobrazení.
 Vyhledává se **nezávisle na PTW**; už shlédnuté (Completed/Watching/On-Hold/
 Dropped) se vyřazují. Výstup je rozdělený na **tři sekce nad týmž poolem**:
 
-- **Nové objevy** — jádro přehledu (`top_n`), bez PTW a bez pokračování sérií,
-  které už máš rozjeté.
+- **Nové objevy** — jádro přehledu (`top_n`), bez PTW, bez pokračování sérií,
+  které už máš rozjeté, a bez populárních titulů mimo plán (další bod).
+- **Znáš, ale nemáš v plánu** (`known_top`) — franšízy s dílem mezi
+  `known_popularity` (default 500) nejpopulárnějšími na MAL, které nemáš
+  v seznamu ani na PTW. Nejspíš o nich víš a vědomě je přeskakuješ, takže
+  mezi objevy jen zabíraly místo; nesrážejí se, jen mají vlastní sekci.
 - **Z tvého plan-to-watch** (`ptw_top`) — tvůj vlastní výběr seřazený týmž
   kompozitem. Dřív PTW tituly zabíraly 15–16 ze 40 míst přehledu.
 - **Pokračování tvých sérií** — franšízy, ze kterých už něco máš. Hlídáš si je
@@ -241,9 +287,10 @@ kompozitem a ostatní se jen vyjmenují. Když je kartou pokračování, jehož
 předchozí díl jsi neviděl, dostane štítek **„začni od: X"** (jen hlavní formáty
 — bez té kontroly by se za začátek série označila i prologová OVA).
 
-Pro každý titul: originální i anglický název, synopse, odůvodnění (které atributy
-a které tvé oblíbené ho táhnou), MAL skóre, odhad tvého hodnocení jako interval,
-a do jaké tvé nálady patří.
+Pro každý titul: originální i anglický název, synopse, odůvodnění — zvlášť
+**„Pro"** (atributy, které ho táhnou nahoru) a **„Proti"** (co ho sráží) — a
+které tvé oblíbené ho doporučily, MAL skóre, odhad tvého hodnocení jako
+interval a do jaké tvé nálady patří.
 
 ### Zpětná vazba z historie
 
@@ -354,14 +401,16 @@ Zkopíruj `config.example.yaml`. Nejčastější páčky:
 
 | parametr | co dělá |
 |---|---|
-| `model.shrinkage_k` | vyšší = konzervativnější (malé vzorky víc tlumeny) |
+| `model.shrinkage_k` | jen `effect_model: marginal` — vyšší = konzervativnější (malé vzorky víc tlumeny) |
 | `model.n_clusters` | `null` = auto; nebo napevno počet nálad |
 | `model.intensity_lexicon` | cesta k intensity.yaml (osa náročnosti, viz `--gen-intensity`) |
 | `model.side_story_weight` | vliv OVA/speciálů/side stories uvnitř franšízy (1.0 = bez rozlišení) |
 | `model.interaction_triples` | experiment: synergie trojic nad jádry nálad (vlastní kalibrovaná škála; CLI hlásí, kolik reálně přinesly) |
 | `recommend.seeds_per_franchise` | max. seedů z jedné franšízy (0 = bez limitu) |
 | `recommend.cluster_fit_weight` | váha shody s náladou uvnitř `taste_fit` (0 = nálady neřadí) |
-| `recommend.w_taste_fit / w_cf / w_user_cf / w_quality` | váhy 4 složek řazení doporučení |
+| `model.effect_model` / `model.ridge_alpha` | `ridge` (default) nebo `marginal` (dřívější průměry + páry); síla penalizace ridge |
+| `recommend.w_taste_fit / w_cf / w_user_cf / w_quality / w_select` | váhy 5 složek řazení doporučení |
+| `recommend.known_popularity` / `known_top` | hranice popularity pro sekci „znáš, ale nemáš v plánu" (0 = vypnuto) |
 | `recommend.min_mal_rec_votes / min_anilist_rec_rating` | prahy síly hrany v grafu podobnosti |
 | `recommend.min_community` | spodní hranice MAL skóre kandidátů (nově i v sezónním pohledu) |
 | `recommend.ptw_top` | kolik titulů v sekci „z tvého PTW" |
@@ -395,6 +444,7 @@ animodel/
   attributes.py     kanonizace + deduplikace atributů napříč zdroji
   intensity.py      osa emocionální náročnosti: lexikon, prefill, --gen-intensity
   usercf.py         user-based CF: senpai pipeline (discovery -> plné seznamy -> výběr)
+  selection.py      model výběru: čemu se mezi populárními tituly vyhýbáš
   season.py         sezónní doporučení (--season): pokračování + nové tituly + finále
   history.py        záznam běhů (klíč = otisk seznamu) + zpětná vazba z nového exportu
   backtest.py       časová validace nad my_finish_date (--backtest): disjunktní

@@ -9,9 +9,21 @@ history_dir: history      # záznamy běhů pro zpětnou vazbu (viz --no-history
                           # musí přežít
 
 model:
-  shrinkage_k: 8.0          # vyšší = konzervativnější efekty (malé vzorky víc tlumeny)
-  min_attr_count: 4.0       # min. efektivní počet titulů, aby atribut vstoupil
-  interaction_min_count: 8.0
+  effect_model: ridge       # jak se počítají efekty atributů (HODNOCENI §9d #3):
+                            #   ridge    -- regrese na centrované atributy: chybějící
+                            #               oblíbený atribut sráží, korelované tagy
+                            #               se dělí o jeden efekt (default od 2026-09)
+                            #   marginal -- smrštěný průměr rezidua titulů s atributem,
+                            #               + páry a trojice (dřívější model)
+                            # Backtest 4 časových oken: Spearman +0,424 → +0,465,
+                            # RMSE 0,741 → 0,729
+  ridge_alpha: 60.0         # síla penalizace ridge (vyšší = konzervativnější);
+                            # 40–150 dává v backtestu plošinu
+  shrinkage_k: 8.0          # jen marginal: vyšší = konzervativnější efekty
+  min_attr_count: 1.5       # min. efektivní počet titulů, aby atribut vstoupil;
+                            # malé vzorky smršťuje ridge, práh odřízne jen
+                            # jednorázovky (při 4 vypadl horor se 2 tituly)
+  interaction_min_count: 8.0  # páry/trojice: jen effect_model: marginal
   interaction_min_lift: 0.30
   interaction_triples: false  # EXPERIMENT: synergie trojic nad jádry nálad
                               # (hierarchický lift nad singly a páry). Změřeno
@@ -69,6 +81,16 @@ recommend:
   w_cf: 0.8                 # váha grafu podobnosti („doporučili to tvé oblíbené")
   w_user_cf: 0.6            # váha user-based CF (podobní uživatelé) — vlastní složka
   w_quality: 0.3            # mírná preference vyššího MAL skóre
+  w_select: 0.5             # model výběru „sáhnu po tom vůbec?" -- učí se z toho,
+                            # co mezi populárními tituly v seznamu CHYBÍ
+                            # (HODNOCENI §9d.4); zachytí, čemu se vyhýbáš
+                            # (horor, thriller, krimi). 0 = vypnuto
+  select_universe: 2000     # vesmír modelu výběru: top-N MAL podle popularity
+  known_popularity: 500     # populární franšízy mimo seznam i PTW jdou z „nových
+                            # objevů" do sekce „znáš, ale nemáš v plánu"
+                            # (skoro jistě je znáš a vědomě je přeskakuješ);
+                            # 0 = vypnuto
+  known_top: 10             # kolik titulů v té sekci
   min_mal_rec_votes: 5      # ignoruj MAL doporučení s méně hlasy (šum)
   min_anilist_rec_rating: 3 # ignoruj AniList doporučení se slabším ratingem
   min_community: 6.5        # nedoporučuj pod tímto MAL skóre

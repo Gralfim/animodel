@@ -16,3 +16,5 @@ def test_tastemodel_defaults_match_model_cfg():
     assert sig["interaction_min_count"].default == cfg.interaction_min_count
     assert sig["interaction_min_lift"].default == cfg.interaction_min_lift
     assert sig["interaction_triples"].default == cfg.interaction_triples
+    assert sig["effect_model"].default == cfg.effect_model
+    assert sig["ridge_alpha"].default == cfg.ridge_alpha

@@ -160,7 +160,8 @@ def _triples_titles(n=90):
 
 
 def _triples_model():
-    return TasteModel(shrinkage_k=2.0, min_attr_count=1.0,
+    # trojice existují jen v marginálním režimu (ridge je vypíná, §9d.7)
+    return TasteModel(effect_model="marginal", shrinkage_k=2.0, min_attr_count=1.0,
                       interaction_min_count=2.0, interaction_min_lift=0.01,
                       interaction_triples=True)
 
@@ -235,7 +236,7 @@ def test_no_clustering_in_folds_when_triples_disabled():
 
 def test_triples_get_their_own_calibrated_factor():
     m = _triples_model().fit(_triples_titles(), n_clusters=2)
-    assert 0.0 <= m.scale <= 1.0
+    assert 0.0 <= m.scale <= TasteModel._SCALE_GRID[-1]
     assert 0.0 <= m.scale_triples <= 1.0
     # grid obsahuje s_triples=0, takže s trojicemi to nikdy nesmí být HORŠÍ
     assert m.cv_rmse <= m.cv_rmse_no_triples + 1e-12
@@ -253,7 +254,7 @@ def test_scale_triples_zeroed_when_full_model_keeps_no_triples():
     """Fold-modely můžou trojice mít, i když plný model žádnou neudrží (jiná
     data → jiné lifty projdou prahem). Grid pak umí vrátit nenulové
     s_triples, které není co škálovat -- nesmí zůstat v atributu."""
-    m = TasteModel(shrinkage_k=2.0, min_attr_count=1.0,
+    m = TasteModel(effect_model="marginal", shrinkage_k=2.0, min_attr_count=1.0,
                    interaction_min_count=2.0,
                    interaction_min_lift=9.99,   # prahem neprojde nic
                    interaction_triples=True).fit(_triples_titles(), n_clusters=2)

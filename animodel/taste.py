@@ -159,17 +159,41 @@ class TasteModel:
         # konstruují TasteModel jen s částí argumentů a dřív tak tiše
         # běžely s jinými prahy než produkce (HODNOCENI_PROJEKTU.md §5.3).
         shrinkage_k: float = 8.0,
-        min_attr_count: float = 4.0,
+        min_attr_count: float = 1.5,
         interaction_min_count: float = 8.0,
         interaction_min_lift: float = 0.30,
         interaction_triples: bool = False,
         intensity: dict[str, float] | None = None,
+        effect_model: str = "ridge",
+        ridge_alpha: float = 60.0,
     ):
         self.K = shrinkage_k
         self.min_attr_count = min_attr_count
         self.int_min_count = interaction_min_count
         self.int_min_lift = interaction_min_lift
-        self.use_triples = interaction_triples
+        # Jak se počítají efekty atributů (HODNOCENI_PROJEKTU.md §9d, nález #3):
+        #   "marginal" -- smrštěný průměr rezidua titulů, které atribut MAJÍ,
+        #                 efekty se sčítají, páry jako lift nad jejich součtem;
+        #   "ridge"    -- ridge regrese rezidua na CENTROVANÉ atributy, tedy
+        #                 efekt při ostatních atributech stejných.
+        # Marginální průměr vychází ≈ (1 − p)·Δ, takže častý oblíbený atribut
+        # (romantika, 61 % seznamu) se ředí a titulu, který ho NEMÁ, se nic
+        # neubere; korelované tagy se navíc sčítají, CV pak stáhne `scale` a
+        # utlumí i skutečné signály. Centrovaná ridge obojí řeší: absence
+        # oblíbeného atributu dává −β·μ a zastupitelné tagy se dělí o jeden
+        # efekt. Páry a trojice v ridge režimu nejsou (část párů byla jen
+        # zástupce utlumených singlů, §9d).
+        if effect_model not in ("marginal", "ridge"):
+            raise ValueError(f"effect_model musí být 'marginal' nebo 'ridge', "
+                             f"ne {effect_model!r}")
+        self.effect_model = effect_model
+        self.ridge_alpha = ridge_alpha
+        self.use_triples = interaction_triples and effect_model == "marginal"
+        # Σ_k β_k·(0 − μ_k): příspěvek stavu „titul nemá žádný atribut".
+        # U ridge nese trest za absenci oblíbených atributů; marginální
+        # model absenci nezná, takže 0. _resid_parts ho přičítá vždy.
+        self._effects_offset: float = 0.0
+        self._ridge_mu: dict[str, float] = {}   # {klíč: vážený průměr váhy}
         # Lexikon osy náročnosti {canon_klíč: −1..+1}; None = vestavěný
         # default (viz intensity.py). cli.py sem předává load_lexicon(...).
         self.intensity = intensity if intensity is not None else DEFAULT_LEXICON
@@ -313,8 +337,62 @@ class TasteModel:
                 n_eff=n_eff, raw_mean=raw, effect=shrunk, distinct=distinct,
                 titles_pos=pos, titles_neg=neg, spoiler=meta[key].spoiler,
             )
+        self._effects_offset, self._ridge_mu = 0.0, {}
+        if self.effect_model == "ridge":
+            self._fit_ridge()
+
+    def _fit_ridge(self):
+        """
+        Přepíše `effect` u atributů, které prošly `min_attr_count`, na
+        koeficienty ridge regrese rezidua na CENTROVANÉ váhy atributů
+        (vážené franšízovými vahami titulů, stejně jako marginální efekty).
+
+        Centrování: predikce je Σ β_k·(x_k − μ_k), kde μ_k je vážený průměr
+        váhy atributu v seznamu. Atribut, který titul nemá, tedy přispívá
+        −β_k·μ_k -- u oblíbeného častého atributu je to srážka, kterou
+        marginální model neumí. Konstanta Σ −β_k·μ_k jde do
+        `_effects_offset`, zbytek zůstává jako `effect · váha` v
+        `_resid_parts`, takže zbytek modelu (kalibrace `scale`, centrování,
+        predict) se nemění.
+
+        Features se nestandardizují: řídký atribut má malý rozptyl, takže ho
+        penalizace `ridge_alpha` smrští silněji -- stejný duch jako
+        `n/(n+K)`. Na reálném seznamu (§9d, nález #3) dává alpha ≈ 60 v CV
+        stejnou chybu jako marginální model, ale rozumnou strukturu: nahoře
+        široké rysy (Romance, Heterosexual, Light novel), vzácné tagy
+        (Rehabilitation 0,44 → 0,10) a scenáristé s n ≈ 5 skoro u nuly.
+        """
+        import numpy as np
+
+        keys = sorted(self.effects)
+        if not keys:
+            return
+        idx = {k: i for i, k in enumerate(keys)}
+        X = np.zeros((len(self.titles), len(keys)))
+        for r, t in enumerate(self.titles):
+            for key, av in t.attrs.items():
+                i = idx.get(key)
+                if i is not None:
+                    X[r, i] = av.weight
+        w = np.array([t.weight for t in self.titles])
+        y = np.array([self._resid[t.mal_id] for t in self.titles])
+        mu = (w @ X) / w.sum()
+        y_mean = float(w @ y) / float(w.sum())
+        A = (X - mu) * np.sqrt(w)[:, None]
+        beta = np.linalg.solve(A.T @ A + self.ridge_alpha * np.eye(len(keys)),
+                               A.T @ ((y - y_mean) * np.sqrt(w)))
+        for key, b in zip(keys, beta):
+            self.effects[key].effect = float(b)
+        self._ridge_mu = {k: float(m) for k, m in zip(keys, mu)}
+        self._effects_offset = -float(beta @ mu)
 
     def _fit_interactions(self):
+        if self.effect_model == "ridge":
+            # Lift páru je definovaný nad SOUČTEM marginálních efektů; nad
+            # ridge koeficienty by znamenal něco jiného. Páry se v ridge
+            # režimu nepočítají (viz __init__).
+            self.interactions = []
+            return
         # Kandidáti = atributy s dost vzorky (jinak kombinatorika × šum)
         keyset = {k for k, e in self.effects.items() if e.n_eff >= self.int_min_count}
         # spočítej páry jen pro tituly (omezit kombinatoriku)
@@ -437,8 +515,11 @@ class TasteModel:
 
         Rozdělení existuje proto, že každá složka má vlastní kalibrovaný
         faktor (`scale`, `scale_triples`) -- viz _calibrate_scale.
+
+        `_effects_offset` je u ridge Σ −β·μ (příspěvek chybějících
+        atributů, viz _fit_ridge), u marginálního modelu 0.
         """
-        base = 0.0
+        base = self._effects_offset
         for key, av in attrs.items():
             e = self.effects.get(key)
             if e:
@@ -488,8 +569,19 @@ class TasteModel:
         """
         return dict(self._resid)
 
-    #: grid kandidátů pro `scale` i `scale_triples` (0.00, 0.05, …, 1.00)
-    _SCALE_GRID = tuple(i / 20 for i in range(0, 21))
+    #: kategorie, u kterých rozpad predikce ukazuje i CHYBĚJÍCÍ atribut
+    #: (ridge režim, viz predict)
+    ABSENCE_CATEGORIES = ("genre", "theme", "demographic", "tag")
+
+    #: grid kandidátů pro `scale` (0.00, 0.05, …, 2.00). Nad 1 jde kvůli
+    #: ridge: koeficienty jsou smrštěné penalizací, takže CV může chtít
+    #: amplitudu větší než 1 -- s gridem do 1,0 naráželo `scale` na strop
+    #: (α ≥ 60, §9d). Marginální model má optimum kolem 0,35, jeho se to
+    #: netýká.
+    _SCALE_GRID = tuple(i / 20 for i in range(0, 41))
+    #: grid pro `scale_triples` (0.00, 0.05, …, 1.00) -- trojice jsou řidší
+    #: důkaz než singly, víc než plnou váhu jim dávat nemá smysl
+    _TRIPLE_GRID = tuple(i / 20 for i in range(0, 21))
     #: zamíchání CV, přes která se sčítají čtverce chyb. Jedno zamíchání
     #: dávalo `s` kolísající o 2 kroky gridu a cv_rmse s sd 0,010 -- snapshoty
     #: pak hlásily „změnu parametrů", která byla jen artefakt seedu. Se třemi
@@ -510,7 +602,7 @@ class TasteModel:
         vybíraní z klastrových signatur, ne z plné enumerace. Kolik jim
         věřit, je proto samostatná otázka a CV na ni umí odpovědět.
         Vyhodnocení jednoho bodu gridu je čistá aritmetika nad
-        předpočítanými CV řádky (_eval_scale), takže 441 kombinací stojí
+        předpočítanými CV řádky (_eval_scale), takže 861 kombinací stojí
         zlomek sekundy -- fitovat se nic znovu nemusí.
 
         Při shodě RMSE vyhrává NIŽŠÍ faktor (grid je vzestupný a porovnává
@@ -527,7 +619,7 @@ class TasteModel:
 
         best_rmse, best_mae, best_s, best_st = float("inf"), 0.0, 0.0, 0.0
         for s in grid:
-            for st in (grid if self.use_triples else (0.0,)):
+            for st in (self._TRIPLE_GRID if self.use_triples else (0.0,)):
                 rmse, mae = self._eval_scale(rows, s, st)
                 if rmse < best_rmse:
                     best_rmse, best_mae, best_s, best_st = rmse, mae, s, st
@@ -604,7 +696,9 @@ class TasteModel:
             sub = TasteModel(self.K, self.min_attr_count,
                              self.int_min_count, self.int_min_lift,
                              interaction_triples=self.use_triples,
-                             intensity=self.intensity)
+                             intensity=self.intensity,
+                             effect_model=self.effect_model,
+                             ridge_alpha=self.ridge_alpha)
             sub.titles = train
             sub._fit_baseline(train)
             sub._resid = {t.mal_id: sub._target(t) for t in train}
@@ -651,6 +745,13 @@ class TasteModel:
         konstanta celého modelu, ne vlastnost atributu, takže do rozpadu
         „proč" nepatří. Součet příspěvků se proto o `scale·raw_center` liší
         od `affinity()`.
+
+        Ridge režim: přítomný atribut přispívá `β·(váha − μ)` a CHYBĚJÍCÍ
+        `−β·μ` (label „bez X", kategorie "absence"). Právě to marginální
+        model neuměl -- Death Note za chybějící romantiku neztratil nic
+        (§9d, nález #3). Absence se ukazuje jen u žánrů, témat, demografie
+        a tagů: „bez J.C.Staff" nebo „bez 2010s" by nic nevysvětlilo, i když
+        v součtu jsou.
         """
         base = self._baseline_pred(community)
         pred = base + self.affinity(attrs)
@@ -659,12 +760,22 @@ class TasteModel:
         hi = min(10.0, pred + self.resid_std)
 
         contribs = []
+        mu = self._ridge_mu                  # u marginálního modelu prázdné
         for key, av in attrs.items():
             e = self.effects.get(key)
             if e and abs(e.effect) > 1e-6:
                 contribs.append((e.label, e.category,
-                                 self.scale * e.effect * av.weight,
+                                 self.scale * e.effect * (av.weight - mu.get(key, 0.0)),
                                  av.spoiler or e.spoiler))
+        for key, m in mu.items():
+            if key in attrs:
+                continue
+            e = self.effects[key]
+            if e.category not in self.ABSENCE_CATEGORIES:
+                continue
+            v = -self.scale * e.effect * m
+            if abs(v) >= 0.005:
+                contribs.append((f"bez {e.label}", "absence", v, False))
         present = set(attrs)
         for it in self.interactions:
             if it.a in present and it.b in present:

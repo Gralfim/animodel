@@ -117,3 +117,41 @@ def test_watched_franchise_member_keeps_title_out_of_discovery():
     res = _run({31: 40.0}, enriched, watched=[30])
     assert [r.mal_id for r in res.discovery] == [31]
     assert res.continuations == []
+
+
+def _pop(mid, title, popularity, relations=None):
+    return Enriched(mal_id=mid, title=title, title_en="", community=7.5, attrs={},
+                    jikan={"type": "TV", "relations": relations or [],
+                           "popularity": popularity})
+
+
+def test_popular_titles_outside_list_go_to_known_section():
+    """Populární titul, který nemám ani na PTW, skoro jistě znám a vědomě
+    přeskakuju (§9d.4): nesráží se, jen jde z objevů do vlastní sekce.
+    Rozhoduje nejpopulárnější díl franšízy -- karta druhé řady s horším
+    pořadím popularity patří do sekce taky."""
+    enriched = {
+        40: _pop(40, "Slavný thriller", 12),
+        41: _pop(41, "Neznámá romance", 2400),
+        42: _pop(42, "Slavná série S1", 120, [_rel("Sequel", 43)]),
+        43: _pop(43, "Slavná série S2", 900, [_rel("Prequel", 42)]),
+        44: _pop(44, "Slavné z mého PTW", 30),
+    }
+    res = _run({40: 50.0, 41: 20.0, 42: 5.0, 43: 60.0, 44: 40.0}, enriched,
+               ptw=[44])
+    assert [r.mal_id for r in res.discovery] == [41]
+    assert [r.mal_id for r in res.known] == [43, 40]
+    assert [r.mal_id for r in res.ptw_ranked] == [44]     # PTW zůstává PTW
+
+
+def test_known_section_can_be_disabled():
+    enriched = {40: _pop(40, "Slavný thriller", 12)}
+    cfg_off = Config()
+    cfg_off.recommend.known_popularity = 0
+    meta = {40: {"item_votes": 5.0, "user_votes": 0.0, "cf_seeds": [],
+                 "sources": {"MAL-rec"}}}
+    rec = Recommender(_Model(), _Enr(enriched), cfg_off)
+    rec._gather_candidates = lambda titles, seen_ids: meta
+    res = rec.recommend([], ptw_ids=set(), watched_ids=set(),
+                        show_progress=False, limit=None)
+    assert [r.mal_id for r in res.discovery] == [40] and res.known == []

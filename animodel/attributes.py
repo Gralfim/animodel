@@ -80,7 +80,16 @@ _ORIGIN_LABELS = {
 # klienta (dřív to bylo duplikované i v jikan.py::list_all_staff -- ta
 # frekvenční pomůcka se nikdy nikde nevolala a byla 2026-07-25 smazána).
 DIRECTOR_POSITIONS = {"director", "series director"}
-WRITER_POSITIONS = {"script", "series composition", "screenplay",
+# "script" tu schválně NENÍ: MAL pod holým "Script" vede i lokalizaci
+# (překlad titulků/dabingu). "Writer: Decouzon, Mélanie" -- francouzská
+# lokalizace u Tokyo Revengers i Sakamichi no Apollon -- tak dostal efekt
+# +0,30 a byl druhým největším kladným důvodem doporučení (HODNOCENI §9d,
+# nález #5). Změřeno na 487 ohodnocených titulech: nejčastější holé "Script"
+# kredity jsou lokalizátoři (Decouzon 11×, Mattos 9×, Stocker 7×), zbytek
+# hlavně epizodní scenáristé. Hlavního scenáristu série pokrývá "series
+# composition". Varianta "Script jen u titulů bez Series Composition" byla
+# zamítnuta: lokalizace by prosakovala dál (Salva, Stocker 4×, Decouzon 2×).
+WRITER_POSITIONS = {"series composition", "screenplay",
                     "original creator", "original story"}
 
 
@@ -202,11 +211,16 @@ def build_attributes(
 
     # ── AniList ──────────────────────────────────────────────────
     if anilist:
-        # Žánry bezpodmínečně -- kanonizace je stejně sloučí s MAL žánry
-        # (stejný klíč), takže v normálním režimu nic nezdvojí a v nouzovém
-        # AniList-only režimu (--no-jikan) nesou žánrový signál samy.
-        for g in anilist.get("genres") or []:
-            _add(out, g, "genre", 1.0)
+        # Žánry jen jako fallback, když MAL žádné nemá -- stejně jako
+        # zdroj/formát/dekáda níž. Dřív šly bezpodmínečně a binárně (váha
+        # 1,0), takže volnější AniList žánr přebil MAL: Tokyo Revengers má na
+        # MAL jen Action + Drama, AniList přidal Romance a model ji počítal
+        # stejně jako u Toradory (HODNOCENI §9d, nález #4). V nouzovém
+        # AniList-only režimu (--no-jikan) a u titulů, kde Jikan selhal,
+        # nesou žánrový signál dál samy.
+        if not (jikan and jikan.get("genres")):
+            for g in anilist.get("genres") or []:
+                _add(out, g, "genre", 1.0)
         for tag in anilist.get("tags", []) or []:
             if tag.get("isAdult"):
                 continue

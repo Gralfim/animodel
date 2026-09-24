@@ -214,8 +214,16 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
 
     # afinitní efekty
     parts.append('<h2>Které atributy táhnou tvůj vkus</h2>')
-    parts.append('<p class="note">„Efekt" = o kolik atribut posouvá tvou odchylku od baseline '
-                 '(po smrštění malých vzorků k nule). „Δ komunita" = o kolik výš než komunita '
+    ridge = getattr(model, "effect_model", "marginal") == "ridge"
+    if ridge:
+        eff_note = ('„Efekt" = o kolik atribut posouvá tvou odchylku od baseline, když '
+                    'zbytek titulu zůstane stejný (ridge regrese: zastupitelné atributy se '
+                    'o efekt dělí, malé vzorky se smršťují k nule). Titul, kterému chybí '
+                    'oblíbený atribut, dostane srážku. ')
+    else:
+        eff_note = ('„Efekt" = o kolik atribut posouvá tvou odchylku od baseline '
+                    '(po smrštění malých vzorků k nule). ')
+    parts.append(f'<p class="note">{eff_note}„Δ komunita" = o kolik výš než komunita '
                  'hodnotíš tituly s tímto atributem. Bar je škálovaný na největší efekt.</p>')
 
     pos = model.top_effects(n=16, sign=1)
@@ -326,9 +334,13 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         '„kvalita" počítala dvakrát.<br>'
         '<b>2. Cíl = afinita.</b> Co zbude po odečtení baseline. To je tvůj osobní podpis nad rámec toho, '
         'co by čekal kdokoli.<br>'
-        '<b>3. Efekty atributů.</b> Empiricko-bayesovsky smrštěný vážený průměr afinity na atribut '
-        '(malé vzorky táhnuté k nule koeficientem K). Atributy se objevují samy z dat — žádný ruční '
-        'konfigurák.<br>'
+        + ('<b>3. Efekty atributů.</b> Ridge regrese afinity na centrované atributy: každý efekt '
+           'platí „při ostatním stejném", zastupitelné tagy se o něj dělí a řídké vzorky se '
+           'smršťují k nule. Titul, kterému chybí oblíbený atribut, dostane srážku. '
+           if ridge else
+           '<b>3. Efekty atributů.</b> Empiricko-bayesovsky smrštěný vážený průměr afinity na atribut '
+           '(malé vzorky táhnuté k nule koeficientem K). ')
+        + 'Atributy se objevují samy z dat — žádný ruční konfigurák.<br>'
         '<b>4. Nálady.</b> KMeans na normalizovaných atributových vektorech, počet klastrů dle siluety.<br>'
         '<b>5. Kalibrace.</b> Globální škála a interval predikce z 5-násobné cross-validace, '
         'jejíž foldy se dělí <i>po franšízách</i> (díl série v tréninku by testu prozradil její '
@@ -360,7 +372,8 @@ def render_model_html(model, userinfo: dict, stats: dict, out_path: str) -> str:
         cal += '.'
     parts.append(f'<p class="note">{cal}</p>')
 
-    parts.append(_foot(f"shrinkage K={model.K:g}"))
+    parts.append(_foot(f"ridge α={model.ridge_alpha:g}" if ridge
+                       else f"shrinkage K={model.K:g}"))
     out = "\n".join(parts)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(out)
@@ -374,6 +387,46 @@ def _anchor_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "cluster"
 
 
+#: kolik kladných / záporných příspěvků ukázat v kartě
+WHY_PRO_MAX = 5
+WHY_CON_MAX = 3
+
+
+def _why_html(why: list, cluster_name: str = "", avoided: list = ()) -> str:
+    """
+    Řádky „Pro:" a „Proti:" z rozpadu predikce `[(label, kat., hodnota, spoiler)]`
+    a volitelně „Obvykle nevybíráš:" z modelu výběru (`avoided` = labely
+    atributů, kterým se mezi populárními tituly vyhýbám, selection.py).
+    Model výběru měří něco jiného než model vkusu (jestli po titulu vůbec
+    sáhnu, ne jakou známku dám), proto má vlastní řádek a nemíchá se do
+    „Proti".
+
+    Dřív byl jediný řádek „Proč:" s top-6 příspěvky podle ABSOLUTNÍ hodnoty,
+    záporné jen obarvené červeně. „Action + Drama" (−0,31) tak u Tokyo
+    Revengers stálo jako první „důvod" doporučení, přestože šlo o srážku
+    (HODNOCENI_PROJEKTU.md §9d, nález #10). Pořadí uvnitř řádku zůstává
+    podle síly příspěvku.
+    """
+    def spans(items):
+        out = []
+        for lab, _cat, val, spoil in items:
+            sign = "pos" if val >= 0 else "neg"
+            cls = f"{sign} spoiler-item" if spoil else sign
+            out.append(f'<span class="{cls}">{_esc(lab)}</span>')
+        return ", ".join(out)
+
+    pro = [w for w in why if w[2] >= 0][:WHY_PRO_MAX]
+    con = [w for w in why if w[2] < 0][:WHY_CON_MAX]
+    cl = f'<span class="tag">{_esc(cluster_name)}</span>' if cluster_name else ""
+    html = f'<div class="why"><b>Pro:</b> {spans(pro) or "—"} &nbsp;{cl}</div>'
+    if con:
+        html += f'<div class="why"><b>Proti:</b> {spans(con)}</div>'
+    if avoided:
+        items = ", ".join(f'<span class="neg">{_esc(a)}</span>' for a in avoided)
+        html += f'<div class="why"><b>Obvykle nevybíráš:</b> {items}</div>'
+    return html
+
+
 def _rec_card(r, rank: int) -> str:
     """HTML karta jednoho doporučení. Sdílená mezi globálním i per-klastr pohledem."""
     ten = (f' · <span class="ten">{_esc(r.title_en)}</span>'
@@ -382,12 +435,6 @@ def _rec_card(r, rank: int) -> str:
     # „začni od: X" -- karta je pokračování, jehož předchozí díl jsi neviděl
     if getattr(r, "entry_note", None):
         flag += f'<span class="flag">{_esc(r.entry_note)}</span>'
-    why_parts = []
-    for lab, cat, val, spoil in r.why:
-        sign = "pos" if val >= 0 else "neg"
-        cls = f"{sign} spoiler-item" if spoil else sign
-        why_parts.append(f'<span class="{cls}">{_esc(lab)}</span>')
-    why = ", ".join(why_parts) if why_parts else "—"
     seeds = ""
     if r.cf_seeds:
         seeds = ('<div class="note" style="margin-top:6px">protože máš rád: '
@@ -399,7 +446,6 @@ def _rec_card(r, rank: int) -> str:
                                               for m in members[:5])
             + (f' a {len(members) - 5} dalších' if len(members) > 5 else "")
             + '</div>') if members else ""
-    cl = f'<span class="tag">{_esc(r.cluster_name)}</span>' if r.cluster_name else ""
     comm = f'{r.community:.2f}' if r.community is not None else '—'
     syn = _esc(r.synopsis[:340] + ("…" if len(r.synopsis) > 340 else "")) if r.synopsis else ""
     src = " · ".join(_esc(s) for s in r.sources)
@@ -436,7 +482,7 @@ def _rec_card(r, rank: int) -> str:
         f'<div class="s"><div class="n">{comm}</div><div class="k">MAL score</div></div>'
         f'{cf_boxes}'
         f'</div>'
-        f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
+        f'{_why_html(r.why, r.cluster_name, getattr(r, "avoided", ()))}'
         f'{season_line}'
         f'{seeds}'
         f'{more}'
@@ -447,12 +493,14 @@ def _rec_card(r, rank: int) -> str:
 
 
 def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None,
-                                ptw: list = None, continuations: list = None) -> str:
+                                ptw: list = None, continuations: list = None,
+                                known: list = None, known_popularity: int = 0) -> str:
     """
-    Doporučení ve třech sekcích nad TÝMŽ poolem (viz Recommender._franchise_views):
-    nové objevy, tituly z PTW a pokračování rozjetých sérií. Dřív byly všechny
-    v jednom žebříčku, kde PTW zabíralo 15-16 ze 40 míst a pokračování další
-    (HODNOCENI_PROJEKTU.md §9c).
+    Doporučení v sekcích nad TÝMŽ poolem (viz Recommender._franchise_views):
+    nové objevy, populární tituly mimo seznam („znáš, ale nemáš v plánu"),
+    tituly z PTW a pokračování rozjetých sérií. Dřív byly všechny v jednom
+    žebříčku, kde PTW zabíralo 15-16 ze 40 míst a pokračování další
+    (HODNOCENI_PROJEKTU.md §9c, §9d.4).
     """
     u = _esc((userinfo or {}).get("user_name", "tebe"))
     parts = [_head("Doporučení — animodel")]
@@ -461,10 +509,21 @@ def render_recommendations_html(recs: list, out_path: str, userinfo: dict = None
     parts.append(f'<p class="lead">{len(recs)} nových objevů, seřazených podle '
                  'kompozitního skóre: shoda s tvými atributy a náladami + kolik tvých oblíbených '
                  'je „doporučuje" + mírná preference kvality. Jedna karta = jedna franšíza; '
-                 'tituly z plan-to-watch a pokračování tvých sérií mají vlastní sekce níž.</p>')
+                 'populární tituly, které nemáš v plánu, tituly z plan-to-watch a pokračování '
+                 'tvých sérií mají vlastní sekce níž.</p>')
 
     for i, r in enumerate(recs, 1):
         parts.append(_rec_card(r, i))
+
+    if known:
+        top = f" {known_popularity}" if known_popularity else ""
+        parts.append('<h2>Znáš, ale nemáš v plánu</h2>')
+        parts.append(f'<p class="note">Franšízy mezi{top} nejpopulárnějšími na MAL, '
+                     'které nemáš v seznamu ani na PTW — nejspíš o nich víš a vědomě je '
+                     'přeskakuješ, proto nejsou mezi objevy. Kdyby tě některá přece jen '
+                     'lákala, tady jsou, seřazené týmž kompozitem.</p>')
+        for i, r in enumerate(known, 1):
+            parts.append(_rec_card(r, i))
 
     if ptw:
         parts.append('<h2>Z tvého plan-to-watch</h2>')
@@ -729,14 +788,7 @@ def _cf_rec_card(r_cf: dict, enr, rank: int, watched: bool = False) -> str:
     # Proc / atributy z enr
     why_html = ""
     if enr and enr.why:
-        why_parts = []
-        for lab, cat, val, spoil in enr.why:
-            sign = "pos" if val >= 0 else "neg"
-            cls = f"{sign} spoiler-item" if spoil else sign
-            why_parts.append(f'<span class="{cls}">{_esc(lab)}</span>')
-        why = ", ".join(why_parts)
-        cl  = f'<span class="tag">{_esc(enr.cluster_name)}</span>' if enr.cluster_name else ""
-        why_html = f'<div class="why"><b>Proč:</b> {why} &nbsp;{cl}</div>'
+        why_html = _why_html(enr.why, enr.cluster_name, getattr(enr, "avoided", ()))
 
     # Seeds z item-CF
     seeds_html = ""

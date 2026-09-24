@@ -100,6 +100,26 @@ def test_model_html_marks_spoiler_rows_and_has_toggle(tmp_path):
     assert "body.nospoil .spoiler-item" in html  # CSS, které skrývání dělá
 
 
+def test_recommendation_card_splits_pro_and_con(tmp_path):
+    """Záporné příspěvky patří do „Proti", ne mezi důvody -- „Action + Drama"
+    (−0,31) dřív stálo u Tokyo Revengers jako první „Proč" (§9d, nález #10)."""
+    rec = Recommendation(
+        mal_id=1, title="X", title_en="", community=8.0, pred=8.5,
+        pred_lo=8.0, pred_hi=9.0, taste_fit=1.0, cf_signal=2.0, composite=1.5,
+        ptw=False, cluster_name="",
+        why=[("Action + Drama", "interakce", -0.31, False),
+             ("Romance", "genre", 0.20, False),
+             ("Action", "genre", -0.08, False)],
+        cf_seeds=[], synopsis="", sources=["MAL-rec"],
+    )
+    out = tmp_path / "recs.html"
+    report.render_recommendations_html([rec], str(out))
+    html = out.read_text(encoding="utf-8")
+    assert '<b>Pro:</b> <span class="pos">Romance</span>' in html
+    assert ('<b>Proti:</b> <span class="neg">Action + Drama</span>, '
+            '<span class="neg">Action</span>') in html
+
+
 def test_recommendations_html_marks_spoiler_why_items(tmp_path):
     rec = Recommendation(
         mal_id=1, title="X", title_en="", community=8.0, pred=8.5,
@@ -114,3 +134,22 @@ def test_recommendations_html_marks_spoiler_why_items(tmp_path):
     assert "spoiltoggle" in html
     assert '<span class="pos spoiler-item">Tragedy</span>' in html
     assert '<span class="neg">Comedy</span>' in html   # non-spoiler bez třídy
+
+
+def test_card_shows_avoided_attributes_and_known_section(tmp_path):
+    """Model výběru má vlastní řádek (měří „sáhnu po tom vůbec?", ne známku)
+    a populární přeskočené tituly vlastní sekci (§9d.4)."""
+    rec = Recommendation(
+        mal_id=1, title="X", title_en="", community=8.6, pred=8.0,
+        pred_lo=7.5, pred_hi=8.5, taste_fit=0.1, cf_signal=2.0, composite=0.5,
+        ptw=False, cluster_name="", why=[], cf_seeds=[], synopsis="",
+        sources=["MAL-rec"], avoided=["Primarily Male Cast", "Thriller"],
+        popularity=2,
+    )
+    out = tmp_path / "recs.html"
+    report.render_recommendations_html([], str(out), known=[rec],
+                                       known_popularity=500)
+    html = out.read_text(encoding="utf-8")
+    assert "Znáš, ale nemáš v plánu" in html and "mezi 500 nejpopulárnějšími" in html
+    assert ('<b>Obvykle nevybíráš:</b> <span class="neg">Primarily Male Cast</span>, '
+            '<span class="neg">Thriller</span>') in html

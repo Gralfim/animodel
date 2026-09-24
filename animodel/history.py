@@ -107,7 +107,9 @@ POOL_SUFFIX = ".pool.json"
 #: sloupce řádku poolu ve vedlejším souboru
 POOL_COLUMNS = ("mal_id", "composite", "taste_fit", "affinity", "cluster_fit",
                 "cf_signal", "user_cf_signal", "community", "pred", "pred_lo",
-                "pred_hi", "ptw", "sources")
+                "pred_hi", "ptw", "sources", "select")
+# "select" (model výběru, §9d.4) přibyl 2026-09-24 na KONCI: pool se čte podle
+# jmen sloupců uložených v souboru, starší snapshoty ho prostě nemají
 #: sloupce logu predikcí mimo pool; origin = "ptw" | "franchise"
 EXTRA_COLUMNS = ("mal_id", "pred", "pred_lo", "pred_hi", "affinity",
                  "community", "origin")
@@ -211,7 +213,7 @@ def _pool_row(r) -> list:
             _round(r.affinity), _round(r.cluster_fit), _round(r.cf_signal),
             _round(r.user_cf_signal), _round(r.community), _round(r.pred),
             _round(r.pred_lo), _round(r.pred_hi), int(bool(r.ptw)),
-            ",".join(r.sources)]
+            ",".join(r.sources), _round(r.select)]
 
 
 def prediction_row(mal_id, pred, pred_lo, pred_hi, affinity, community,
@@ -277,12 +279,17 @@ def build_snapshot(entries, recs, model, cfg, *, top: int = 100,
         },
         config={
             "shrinkage_k": cfg.model.shrinkage_k,
+            "effect_model": cfg.model.effect_model,
+            "ridge_alpha": cfg.model.ridge_alpha,
+            "min_attr_count": cfg.model.min_attr_count,
             "interaction_triples": cfg.model.interaction_triples,
             "cluster_fit_weight": cfg.recommend.cluster_fit_weight,
             "w_taste_fit": cfg.recommend.w_taste_fit,
             "w_cf": cfg.recommend.w_cf,
             "w_user_cf": cfg.recommend.w_user_cf,
             "w_quality": cfg.recommend.w_quality,
+            "w_select": cfg.recommend.w_select,
+            "known_popularity": cfg.recommend.known_popularity,
             "use_user_cf": cfg.recommend.use_user_cf,
         },
         schema=SCHEMA,

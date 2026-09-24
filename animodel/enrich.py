@@ -174,7 +174,15 @@ class Enricher:
             ShikimoriClient(cfg.cache_dir) if cfg.enrich.use_shikimori else None
         )
 
-    def enrich_ids(self, mal_ids: list[int], show_progress=True) -> dict[int, Enriched]:
+    def enrich_ids(self, mal_ids: list[int], show_progress=True,
+                   with_staff: bool = True) -> dict[int, Enriched]:
+        """
+        MAL ID → Enriched (atributy, komunita, synopse, surová data zdrojů).
+
+        `with_staff=False` přeskočí staff i při `include_staff` -- pro
+        hromadné vesmíry (selection.py: ~1800 populárních titulů), kde by
+        Jikan staff stál request na titul a model výběru ho nepoužívá.
+        """
         jdata = {}
         if self.jikan:
             jdata = self.jikan.get_anime_batch(mal_ids, show_progress=show_progress)
@@ -196,7 +204,7 @@ class Enricher:
         #
         # AniList je vynucený v --no-jikan režimu, kde je jediný dostupný.
         sdata = {}
-        if self.cfg.enrich.include_staff:
+        if self.cfg.enrich.include_staff and with_staff:
             want_anilist = self.cfg.enrich.staff_source == "anilist" or not self.jikan
             if want_anilist and self.anilist:
                 # Přišlo už v dávce výš -> 0 requestů navíc.

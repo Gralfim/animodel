@@ -165,6 +165,29 @@ class JikanClient:
             self._sleep(REQUEST_DELAY)
         return results
 
+    def get_top_popular(self, limit: int) -> list[dict]:
+        """
+        Nejpopulárnější tituly MAL (podle počtu členů), prvních `limit`:
+        /top/anime?filter=bypopularity, stránky po 25. Vrací list anime dicts
+        (mal_id, members, popularity, type, aired, …; BEZ relations -- ty má
+        jen /full).
+
+        Vesmír pro model výběru (selection.py): „o čem uživatel nejspíš ví".
+        Cachuje se jako každý endpoint, bez expirace -- pořadí popularity se
+        mění pomalu; čerstvý seznam = smazat cache/mal/top_anime_*.
+        """
+        results = []
+        page = 1
+        while len(results) < limit:
+            data = self._get(f"top/anime?filter=bypopularity&page={page}")
+            if not data or "data" not in data:
+                break
+            results.extend(data["data"])
+            if not data.get("pagination", {}).get("has_next_page"):
+                break
+            page += 1
+        return results[:limit]
+
     def get_anime_batch(
         self,
         mal_ids: list[int],

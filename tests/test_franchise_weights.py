@@ -176,6 +176,9 @@ class _StubModel:
     def top_effects(self, n=40, sign=1):
         return []
 
+    def residuals(self):
+        return {}
+
 
 class _StubEnricher:
     jikan = None
@@ -202,6 +205,34 @@ def test_seeds_capped_per_franchise_best_seasons_win():
     ids = [t.mal_id for t in seeds]
     # z franšízy 1 jen dvě nejlepší řady; standalone a druhá franšíza nedotčené
     assert ids == [1, 2, 10, 11, 12]
+
+
+def test_seeds_ordered_by_residual_not_by_export_order():
+    """Remízy ve známce dřív rozhodovalo pořadí exportu (abecedně), takže
+    ze 134 devítek se seedem stalo prvních 10 podle abecedy (§9d, nález #2).
+    Teď rozhoduje reziduum: o kolik víc se mi titul líbil, než čeká baseline."""
+    class _ResidModel(_StubModel):
+        def residuals(self):
+            # export je abecední: 1 = "A…", 4 = "D…"; reziduum pořadí obrací
+            return {1: 0.2, 2: 0.9, 3: 1.4, 4: 0.5}
+
+    cfg = Config()
+    cfg.recommend.max_seeds = 2
+    rec = Recommender(_ResidModel(), _StubEnricher(), cfg)
+    titles = [_seed_title(i, 9.0) for i in (1, 2, 3, 4)]
+    assert [t.mal_id for t in rec._seeds(titles)] == [3, 2]
+
+
+def test_seeds_residual_beats_raw_score():
+    """Desítka u titulu, který miluje i komunita, je slabší doklad osobního
+    vkusu než devítka u titulu, který komunita hodnotí průměrně."""
+    class _ResidModel(_StubModel):
+        def residuals(self):
+            return {1: 1.19, 2: 1.70}
+
+    rec = Recommender(_ResidModel(), _StubEnricher(), Config())
+    titles = [_seed_title(1, 10.0), _seed_title(2, 9.0)]
+    assert [t.mal_id for t in rec._seeds(titles)] == [2, 1]
 
 
 def test_seeds_cap_zero_disables_limit():
