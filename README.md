@@ -222,9 +222,13 @@ Dvě nezávislé větve, sjednocené a deduplikované:
   baseline (`norm ≈ a + b·komunita`). Bez toho vycházel jako nejpodobnější ten,
   kdo jen kopíruje dav — kdo dává všemu desítku, je čistý obraz komunity a na
   reálných datech tvořili takoví hodnotitelé 16 z 20 vybraných senpai.
-  Senpai jsou vidět jmenovitě v CF reportu i s metrikami; do kompozitu vstupuje
-  jejich **smrštěná odchylka od baseline** bez komunitního skóre (to má vlastní
-  složku `w_quality`, jinak by se počítalo dvakrát).
+  Senpai jsou vidět jmenovitě v CF reportu i s metrikami. Jejich signál
+  (**smrštěná odchylka od baseline** bez komunitního skóre) má v kompozitu
+  vlastní složku, ale od 2026-09 s **výchozí vahou 0**: časový test ukázal,
+  že tvé pozdější známky sám předpovídá jen slabě (Spearman +0,19) a
+  k modelu vkusu nic nepřidá — s váhou 0,6 se pořadí dokonce zhoršilo
+  (0,46 → 0,43; HODNOCENI §9d.8). Senpai dál dodávají **kandidáty** do poolu
+  (odtud přišly tituly jako Summer Pockets) a CF report.
   Tvůj vlastní účet se vylučuje (podle jména z MAL exportu; máš-li na AniListu
   jinou přezdívku, přidej ji do `recommend.user_cf_exclude_users`) — import
   vlastního seznamu má podobnost 1.00 a doporučil by ti jen to, co už máš.
@@ -235,7 +239,7 @@ složek):
 ```
 composite = w_taste_fit · afinita+shoda_s_náladou
           + w_cf        · „doporučili to tvé oblíbené" (graf, log-tlumené hlasy)
-          + w_user_cf   · user-based CF (podobní uživatelé)
+          + w_user_cf   · user-based CF (podobní uživatelé; default 0, viz výš)
           + w_quality   · komunitní skóre
           + w_select    · „sáhneš po tom vůbec?" (model výběru)
 ```
@@ -332,8 +336,9 @@ Co je na tom podstatné:
   jakou ze seznamu dostaneš.
 
 **Co snapshot ukládá** (schéma 2): stav celého seznamu (status, známka, datum
-dokončení), datum exportu (mtime souboru), parametry baseline i z-skóre a
-top-100 doporučení. Ve vedlejším souboru `{n}_{otisk}.pool.json` pak **celý
+dokončení), datum exportu (mtime souboru), parametry baseline i z-skóre,
+top-100 doporučení a **co report skutečně ukázal** (karty po sekcích — nové
+objevy, „znáš, ale nemáš v plánu", PTW, pokračování). Ve vedlejším souboru `{n}_{otisk}.pool.json` pak **celý
 pool kandidátů** se složkami kompozitu (~400 kB) a **log predikcí** pro tituly
 mimo pool: celé PTW a neviděné díly franšíz do dvou kroků od toho, co máš
 shlédnuté nebo v plánu. Díky poolu jde později přepočítat pořadí s jinými

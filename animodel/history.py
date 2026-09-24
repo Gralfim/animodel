@@ -162,6 +162,13 @@ class Snapshot:
                              # řádky POOL_COLUMNS -- jen ve vedlejším souboru
     extra: list = field(default_factory=list)
                              # řádky EXTRA_COLUMNS -- jen ve vedlejším souboru
+    shown: dict = field(default_factory=dict)
+                             # {sekce reportu: [mal_id karet v pořadí]} --
+                             # co report SKUTEČNĚ ukázal (od 2026-09-24).
+                             # `recommendations` je top-N celého poolu včetně
+                             # PTW a pokračování, ne to, co bylo vidět; bez
+                             # toho nejde poctivě spočítat „ukázáno a do PTW
+                             # nepřidáno" (povědomí pro model výběru, §9d.8)
 
     @property
     def filename(self) -> str:
@@ -192,6 +199,7 @@ class Snapshot:
             "config": self.config,
             "list": self.list_state,
             "recommendations": self.recommendations,
+            "shown": self.shown,
         }
 
     @classmethod
@@ -205,6 +213,7 @@ class Snapshot:
             model=d.get("model", {}), config=d.get("config", {}),
             schema=d.get("schema", 1), export_date=d.get("export_date", ""),
             list_state=d.get("list", []),
+            shown=d.get("shown", {}),
         )
 
 
@@ -226,7 +235,8 @@ def prediction_row(mal_id, pred, pred_lo, pred_hi, affinity, community,
 def build_snapshot(entries, recs, model, cfg, *, top: int = 100,
                    now: _dt.datetime | None = None, export_date: str = "",
                    z_params: dict | None = None,
-                   extra: list | None = None) -> Snapshot:
+                   extra: list | None = None,
+                   shown: dict | None = None) -> Snapshot:
     """
     Sestaví snapshot z právě doběhlého běhu.
 
@@ -298,6 +308,7 @@ def build_snapshot(entries, recs, model, cfg, *, top: int = 100,
                     for e in sorted(entries, key=lambda e: e.mal_id)],
         pool=[_pool_row(r) for r in recs],
         extra=list(extra or []),
+        shown=dict(shown or {}),
     )
 
 

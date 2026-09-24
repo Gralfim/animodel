@@ -1317,14 +1317,14 @@ Hlasy z grafu přicházejí u všech tří jen ze tří až čtyř seedů:
 | # | nález | návrh | stav |
 |---|---|---|---|
 | **1** | **Graf podobnosti má kvůli normalizaci několikanásobnou váhu — VYSOKÁ.** Z-skóre složek se počítají přes celý pool (`recommend.py:491-494`). S user-CF má pool 6 615 titulů, hlas z grafu ale jen **399** z nich (6 108 přinesli jen senpai). `log1p(hlasy)` má proto průměr 0,134 a sd 0,599 a **jakýkoli** titul z grafu dostane +3,5 až +6 bodů, zatímco celá složka vkusu má sd 1. Graf tak funguje jako brána: **40/40** nových objevů má hlasy z grafu a tituly s nejlepší shodou s vkusem mimo graf se nahoru nedostanou (Kanon 2006 #110, Air #61, Summer Pockets #174). Efektivní síla `w_cf: 0.8` tak závisí na tom, kolik user-CF-only titulů je v poolu — se zapnutým user-CF se znásobí, aniž se váha změnila. | Parametry z-skóre počítat z **obsahového poolu** (graf + tag-search), ne z celého. Zvážit ořez \|z\| ≤ 2 nebo percentilovou normalizaci, aby žádná složka nemohla fungovat jako brána. Efektivní váhy kompozitu pak nezávisí na tom, jestli je user-CF zapnuté. | ✅ **OPRAVENO** 2026-09-24 — parametry vkusu, grafu a kvality z obsahového poolu, user-CF přes celý pool; ořez \|z\| nebyl potřeba (graf −1,3…+2,1, vkus ±3,3, kvalita ±2,4) |
-| **2** | **Seedy se mezi devítkami vybírají abecedně — VYSOKÁ.** `_seeds` (`recommend.py:167-168`) řadí jen podle známky, remízy rozhoduje pořadí exportu, a to je abecední. 30 desítek (po limitu 2 na franšízu) + prvních **10 ze 134 devítek**: 2.5-jigen no Ririsa … Bakuman., Boku dake ga Inai Machi, Boku no Kokoro no Yabai Yatsu. Clannad, Kimi ni Todoke, Fruits Basket, White Album 2, Plastic Memories ani Oregairu seedem nejsou nikdy. Dva ze čtyř seedů, které přivedly top-3, jsou tam **jen díky písmenu B**. Váha seedu `score − ū + 1` navíc nerozlišuje, *proč* titul máš v oblibě: Steins;Gate (komunita 9,07) má stejnou váhu jako Domestic na Kanojo, ač reziduum má +1,19 proti +2,40. | Řadit seedy podle **rezidua** (`model.residuals()`, o kolik víc se ti titul líbil, než čeká baseline), sekundárně podle známky. Top-40 podle rezidua: Domestic na Kanojo, Yuragi-sou, Hige wo Soru, Koi wa Ameagari, Russia-go Alya-san, 5-toubun … Boku dake (reziduum +0,57) a Bakuman vypadnou. **Nesimulováno** — nové seedy nemají rec graf v cache. K ověření navíc: normalizovat příspěvek seedu jeho celkovým objemem hlasů, ať populární seed (Steins;Gate: hrany se stovkami hlasů) nepřehlasuje romantické seedy, jejichž doporučení se rozptylují do méně známých titulů. | ✅ **OPRAVENO** 2026-09-24 — řazení (reziduum, známka, mal_id); normalizace objemem hlasů seedu otevřená |
+| **2** | **Seedy se mezi devítkami vybírají abecedně — VYSOKÁ.** `_seeds` (`recommend.py:167-168`) řadí jen podle známky, remízy rozhoduje pořadí exportu, a to je abecední. 30 desítek (po limitu 2 na franšízu) + prvních **10 ze 134 devítek**: 2.5-jigen no Ririsa … Bakuman., Boku dake ga Inai Machi, Boku no Kokoro no Yabai Yatsu. Clannad, Kimi ni Todoke, Fruits Basket, White Album 2, Plastic Memories ani Oregairu seedem nejsou nikdy. Dva ze čtyř seedů, které přivedly top-3, jsou tam **jen díky písmenu B**. Váha seedu `score − ū + 1` navíc nerozlišuje, *proč* titul máš v oblibě: Steins;Gate (komunita 9,07) má stejnou váhu jako Domestic na Kanojo, ač reziduum má +1,19 proti +2,40. | Řadit seedy podle **rezidua** (`model.residuals()`, o kolik víc se ti titul líbil, než čeká baseline), sekundárně podle známky. Top-40 podle rezidua: Domestic na Kanojo, Yuragi-sou, Hige wo Soru, Koi wa Ameagari, Russia-go Alya-san, 5-toubun … Boku dake (reziduum +0,57) a Bakuman vypadnou. **Nesimulováno** — nové seedy nemají rec graf v cache. K ověření navíc: normalizovat příspěvek seedu jeho celkovým objemem hlasů, ať populární seed (Steins;Gate: hrany se stovkami hlasů) nepřehlasuje romantické seedy, jejichž doporučení se rozptylují do méně známých titulů. | ✅ **OPRAVENO** 2026-09-24 — řazení (reziduum, známka, mal_id); normalizace objemem hlasů seedu změřena a **zamítnuta** (§9d.8) |
 | **3** | **Součet marginálních průměrů ředí časté atributy a netrestá absenci — VYSOKÁ.** Efekt = smrštěný průměr rezidua titulů, které atribut **mají** (`taste.py:302-303`); titul bez atributu dostane 0. Efekt tak vychází ≈ (1 − p)·Δ, kde p je podíl atributu v seznamu. Romantika (p = 0,61): skutečný kontrast +0,40 bodu (romantika bez akce proti zbytku +0,50), efekt **+0,146**, po `scale` 0,35 **≈ +0,05 bodu**. Akce: skutečně −0,34, v modelu ≈ −0,08. Death Note za absenci romantiky neztratí nic. Součet 27–40 korelovaných tagů navíc nutí CV stáhnout `scale` na 0,35, čímž utlumí i ty skutečné signály — nejhlasitější jsou pak vzácné tagy s extrémním průměrem (Rehabilitation +0,44, Age Gap +0,40, Alternate Universe +0,32). U Death Note se sčítají tropy romantických dramat, které jsou tam okrajové (Unrequited Love, Yandere, Kuudere, Suicide, Amnesia). Pár **Psychological + Supernatural (+0,34)** stojí na Bakemonogatari, Nekomonogatari, Bunny Girl Senpai, Yofukashi no Uta a Fruits Basket — romantických příbězích s nadpřirozeným twistem. Zásluhu romantiky, kterou model neumí přiznat jí samotné, si připíše tahle dvojice a přenese ji na Death Note i Higurashi. | **Ridge regrese nad centrovanými atributy** (cíl zůstává reziduum, alpha ze CV, ~60). V grouped CV je stejně přesná (RMSE **0,9106** proti 0,9104, Spearman 0,416 proti 0,418), ale strukturu má rozumnou: nahoře široké rysy (TV, Male Protagonist, Light novel, Heterosexual, Romance), dole Episodic a **Action**; Rehabilitation +0,10 místo +0,44, Decouzon +0,06 místo +0,30. Na kandidátech spadne afinita Higurashi ze **110. na 652.** místo z 907, Death Note ze **133. na 607.** CV to nerozliší, protože měří jen na tvém seznamu, kde temné tituly nejsou. Podle §9c.2 se o struktuře rozhoduje **časovými okny** (`--backtest`), ne CV — tam ji ověřit před zavedením. Páry po zavedení přeměřit (část z nich byla jen zástupce utlumených singlů). | ✅ **OPRAVENO** 2026-09-24 — `model.effect_model: ridge` (default), α = 60; rozhodnuto backtestem, §9d.7 |
 | **4** | **AniList žánry se slučují binárně — STŘEDNÍ.** `build_attributes` přidává AniList žánry bezpodmínečně s vahou 1,0 (`attributes.py:208-209`). MAL u Tokyo Revengers romantiku nemá (Action, Drama; Delinquents, Time Travel), AniList ano — a model ji pak počítá stejně jako u Toradory. Pro zdroj, formát a dekádu už AniList slouží jen jako fallback, u žánrů ne. | Žánry **primárně z MAL**, AniList jen když MAL žádné nemá. Změřeno spolu s #5: CV RMSE 0,9104 → **0,9063** (v šumu, ale ne hůř). | ✅ **OPRAVENO** 2026-09-24 |
 | **5** | **„Script" zahrnuje lokalizaci — STŘEDNÍ.** `WRITER_POSITIONS` obsahuje `script` (`attributes.py:83-84`) a MAL pod ním vede i překladatele titulků/dabingu. „Writer: Decouzon, Mélanie" (+0,30, druhý největší kladný příspěvek u Tokyo Revengers) je francouzská lokalizace u Tokyo Revengers i Sakamichi no Apollon; podobně „Mattos, Sidney". Všech 30 staff efektů má n_eff 4–8, fakticky tedy kódují identitu jedné franšízy. Staff je zapnutý jen v `config.yaml` (default vypnuto). | Vyřadit `script` z `WRITER_POSITIONS` (hlavního scenáristu kryje `series composition`), nebo v `config.yaml` vrátit `include_staff: false`. | ✅ **OPRAVENO** 2026-09-24 — `script` vyřazen; varianta „Script jen bez Series Composition" zamítnuta (lokalizace prosakovala dál: Salva, Stocker 4×, Decouzon 2×) |
 | **6** | **`min_attr_count` zahazuje vzácnou negativní evidenci — STŘEDNÍ.** Atribut pod prahem 4 (`taste.py:300`) se vyřadí, místo aby ho jen smrštilo `n/(n+K)`. Horor máš u 2 titulů (Highschool of the Dead, Shinsekai yori; rezidua −0,82 a −1,40), efekt Horror je proto 0, tedy „neutrální" — a Higurashi nese žánr Horror. Totéž Delinquents u Tokyo Revengers (AniList rank 95). | Snížit práh na ~1,5–2 a nechat malé vzorky na smrštění. Pozor na vazbu z §9c.3: práh interaguje se sumou vah, takže změnu ověřit časovými okny. | ✅ **OPRAVENO** 2026-09-24 — práh 1,5 (i v `config.yaml`), rozhodnuto backtestem, §9d.7 |
-| **7** | **Chybí negativní evidence (selection bias) — VYSOKÁ, strukturální.** Tituly, kterým se vyhýbáš, v seznamu nejsou; dropnuté máš 2, obě bez známky. Model se tak nemá odkud naučit, že temný obsah vadí: co nezná, bere jako neutrální, a graf s kvalitou to pak vytáhnou nahoru. Tohle je rozdíl proti LLM, které tvé výslovné „ne temné, ne moc akce" použije jako pevné pravidlo. | Viz §9d.4 (populární tituly mimo seznam jako slabý negativní signál); jako doplněk explicitní averze v configu (horor, gore, delikventi) — jde proti principu „žádné ruční seznamy atributů", je to vědomé rozhodnutí. | 🟡 **ČÁSTEČNĚ** 2026-09-24 — model výběru + sekce „znáš, ale nemáš v plánu" (§9d.7); explicitní averze v configu k rozhodnutí |
-| **8** | **Osa náročnosti do řazení nevstupuje a míchá smutné s ošklivým — STŘEDNÍ.** `intensity_of` se používá jen pro popis nálad. Lexikon dává Tragedy +1,0 stejně jako Body Horror a Torture, přitom tragédie ti sedí (reziduum +0,18). | Rozdělit na dvě osy — emoční tíha (tragédie, tearjerker) a pochmurnost/brutalita (horor, gore, body horror) — a teprve tu druhou zvážit jako penalizaci. Vyžaduje druhý sloupec v `intensity.yaml`. | otevřené |
-| **9** | **User-CF je dnes převážně šum — STŘEDNÍ.** Senpai mají reziduální podobnost r = 0,17–0,28 a jejich špička jsou mainstreamové akční tituly (Gintama, Solo Leveling, Shingeki no Kyojin, Dr. Stone). Do kompozitu to přidává ±2 body (Higurashi +1,9) a hlavně nafukuje pool, čímž spouští #1. | Dokud historie neukáže přínos: `w_user_cf: 0`, nebo user-CF-only kandidáty nedávat do poolu kompozitu (CF report ponechat). | otevřené |
+| **7** | **Chybí negativní evidence (selection bias) — VYSOKÁ, strukturální.** Tituly, kterým se vyhýbáš, v seznamu nejsou; dropnuté máš 2, obě bez známky. Model se tak nemá odkud naučit, že temný obsah vadí: co nezná, bere jako neutrální, a graf s kvalitou to pak vytáhnou nahoru. Tohle je rozdíl proti LLM, které tvé výslovné „ne temné, ne moc akce" použije jako pevné pravidlo. | Viz §9d.4 (populární tituly mimo seznam jako slabý negativní signál); jako doplněk explicitní averze v configu (horor, gore, delikventi) — jde proti principu „žádné ruční seznamy atributů", je to vědomé rozhodnutí. | ✅ **ŘEŠENO DATY** 2026-09-24 — model výběru + sekce „znáš, ale nemáš v plánu" (§9d.7); explicitní averze v configu **zamítnuty** rozhodnutím vlastníka: systém má zůstat obecný (§9d.8) |
+| **8** | **Osa náročnosti do řazení nevstupuje a míchá smutné s ošklivým — STŘEDNÍ.** `intensity_of` se používá jen pro popis nálad. Lexikon dává Tragedy +1,0 stejně jako Body Horror a Torture, přitom tragédie ti sedí (reziduum +0,18). | Rozdělit na dvě osy — emoční tíha (tragédie, tearjerker) a pochmurnost/brutalita (horor, gore, body horror) — a teprve tu druhou zvážit jako penalizaci. Vyžaduje druhý sloupec v `intensity.yaml`. | ❌ **ZAMÍTNUTO** 2026-09-24 — jako naučený příznak nic nepřidá, pevná penalizace by byla explicitní averze (§9d.8) |
+| **9** | **User-CF je dnes převážně šum — STŘEDNÍ.** Senpai mají reziduální podobnost r = 0,17–0,28 a jejich špička jsou mainstreamové akční tituly (Gintama, Solo Leveling, Shingeki no Kyojin, Dr. Stone). Do kompozitu to přidává ±2 body (Higurashi +1,9) a hlavně nafukuje pool, čímž spouští #1. | Dokud historie neukáže přínos: `w_user_cf: 0`, nebo user-CF-only kandidáty nedávat do poolu kompozitu (CF report ponechat). | ✅ **OPRAVENO** 2026-09-24 — `w_user_cf: 0` podle časového testu (§9d.8); kandidáty a CF report dodává dál |
 | **10** | **„Proč:" míchá důvody se srážkami — NÍZKÁ, ale matoucí.** Karta ukazuje top-6 příspěvků podle absolutní hodnoty, záporné jen červeně (`report.py:385-390`). „Action + Drama" (−0,31) a „Action" u Tokyo Revengers jsou srážky, ne důvody. | Dva řádky: „Pro:" a „Proti:". | ✅ **OPRAVENO** 2026-09-24 — `report._why_html`, karta nese 12 příspěvků (`WHY_KEEP`), ukazuje max. 5 „Pro" a 3 „Proti" |
 
 Menší odchylky `config.yaml` od example, které se na výsledku podílejí:
@@ -1482,9 +1482,9 @@ Pořadí podle poměru dopad/cena; strukturální změny (#3, #6) rozhodnout
 | **5** | ridge místo součtu marginálních průměrů, přeměřit páry | #3 | den | ✅ hotovo (α = 60) |
 | **6** | nižší `min_attr_count` | #6 | řádek | ✅ hotovo (1,5) |
 | **7** | atributová složka „výběr" (vyhýbání se populárním titulům) do kompozitu; srážku za titul nahradit sekcí „znáš, ale nemáš v plánu" | #7, §9d.4 | den | ✅ hotovo |
-| **8** | dvě osy náročnosti, pochmurnost jako penalizace | #8 | den + revize lexikonu | otevřené |
-| **9** | user-CF z kompozitu, dokud historie neukáže přínos | #9 | config | k rozhodnutí |
-| **10** | explicitní averze v configu | #7 | řádky | k rozhodnutí (proti principu „žádné ruční seznamy") |
+| **8** | dvě osy náročnosti, pochmurnost jako penalizace | #8 | den + revize lexikonu | ❌ zamítnuto (§9d.8) |
+| **9** | user-CF z kompozitu, dokud historie neukáže přínos | #9 | config | ✅ hotovo (`w_user_cf: 0`, časový test) |
+| **10** | explicitní averze v configu | #7 | řádky | ❌ zamítnuto — systém má zůstat obecný; náhradou je model výběru |
 
 ### 9d.6 Co ukázal běh po krocích 1–4 (2026-09-24)
 
@@ -1595,6 +1595,78 @@ Harem", u OreImo „Proti: bez Romance, bez Drama".
 z kompozitu, explicitní averze), normalizace objemem hlasů seedu (#2),
 propojení modelu výběru s historií („doporučeno a do PTW nepřidáno" ⇒
 povědomí ≈ 1, §9d.4 bod 3) a ověření váhy `w_select` až na ledgeru historie.
+
+### 9d.8 Zbývající kroky: rozhodnuto daty (2026-09-24)
+
+**Rozhodnutí vlastníka:** žádné explicitní averze v configu. Systém má
+zůstat obecný, aby mohl běžet i pro jiné uživatele. Averze odvozené
+z dat (model výběru, §9d.4/§9d.7) jsou v pořádku. Tím padá krok 10 a
+pevná penalizace pochmurnosti z kroku 8.
+
+**User-CF (krok 9) — časový test.** Pro každé ze 4 oken backtestu:
+model vkusu natrénovaný jen na titulech dokončených před řezem, z něj
+rezidua, senpai vybraní z 2 569 uložených AniList seznamů jen podle těchto
+titulů (překryv škálovaný velikostí tréninku) a jejich signál
+(`recommend_from_senpai`) pro tituly dokončené v okně. Senpai pokryli
+168 z 170 testovaných titulů, jejich podobnost 0,17–0,32:
+
+| prediktor reziduí titulů z okna | Spearman (95% interval po franšízách) |
+|---|---|
+| jen user-CF | +0,189 [+0,02; +0,35] |
+| jen model vkusu | **+0,460** [+0,34; +0,57] |
+| vkus + 0,3 × user-CF | +0,448 |
+| vkus + 0,6 × user-CF (dosavadní váha) | +0,427 |
+| vkus + 1,0 × user-CF | +0,393 |
+
+Po oknech user-CF 0,32 / 0,14 / 0,25 / 0,14 proti vkusu 0,57 / 0,53 /
+0,51 / 0,27. Signál senpai je slabě kladný, ale obsažený ve vkusu —
+každá nenulová váha pořadí zhoršuje. **`w_user_cf: 0`** (default,
+example i `config.yaml`); user-CF dál dodává kandidáty (tak se do poolu
+dostal Summer Pockets) a CF report. Testy mechaniky složky si váhu
+nastavují samy.
+
+**Osa náročnosti jako naučený příznak (krok 8).** Místo pevné penalizace
+vstupuje `intensity_of` (rozdělená na „náročné" a „lehké", obě nezáporné)
+jako atribut, jehož efekt se učí:
+
+| | bez osy | s osou |
+|---|---|---|
+| ridge, backtest Spearman (vše) | +0,465 | +0,464 |
+| ridge, efekty os | — | +0,003 / −0,009 |
+| model výběru, CV AUC | 0,8649 | 0,8650 |
+
+Model výběru dá náročnosti koeficient −0,21, ale AUC se nepohne —
+informace už je v tazích, ze kterých se osa počítá. **Zamítnuto;** osa
+zůstává popisem nálad. Rozlišení smutné × pochmurné (Tragedy +1,0 stejně
+jako Body Horror) se tím pro řazení nepotřebuje; kdyby vadilo v popisu
+nálad, je to úprava `intensity.yaml`, ne kódu.
+
+**Normalizace hlasů seedu (zbytek nálezu #2).** Leave-franchise-out nad
+487 ohodnocenými tituly: hlasy od 40 seedů mimo vlastní franšízu titulu
+proti jeho reziduu:
+
+| varianta hlasů | Spearman s reziduem | jen tituly s hlasy (n = 169) |
+|---|---|---|
+| surové `log1p` (dosavadní) | +0,226 [+0,13; +0,33] | +0,189 |
+| normalizované objemem seedu | +0,227 | +0,191 |
+| jen počet seedů (× váha) | +0,227 | +0,192 |
+
+Normalizace nic nepřináší — **zamítnuto**. Vedlejší zjištění: graf nese
+skutečnou informaci o vkusu (+0,23, se samotnou komunitou koreluje jen
++0,21), váha `w_cf` tedy opodstatnění má; problém v §9d.1 byla normalizace
+kompozitu a výběr seedů, ne graf samotný.
+
+**Propojení modelu výběru s historií — odloženo, začíná se sbírat.** Za 7
+týdnů historie je událost „doporučeno → PTW" jediná (3-gatsu no Lion) a
+„doporučeno → shlédnuto" dvě z téže franšízy. Snapshot navíc ukládal top-100
+celého poolu (včetně PTW a pokračování), ne to, co report skutečně ukázal.
+Snapshot proto od teď ukládá i **`shown`**: karty po sekcích (nové objevy,
+„znáš", PTW, pokračování). Až bude ukázaných a nepřidaných titulů dost
+(§9c.5: ≥ 15 událostí v kohortě), jde je přidat do vesmíru modelu výběru
+s povědomím 1.
+
+Testů 313 → **314**. Otevřené zůstává jen to, co potřebuje data z historie:
+váha `w_select`, propojení s historií výše a krok 8 z §9c.7.
 
 ---
 

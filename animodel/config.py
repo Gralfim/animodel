@@ -112,7 +112,13 @@ class RecommendCfg:
                                       # řazení nevstupují.
     w_taste_fit: float = 1.0          # shoda s mými afinitními efekty + klastry
     w_cf: float = 0.8                 # graf podobnosti (MAL/AniList/Shikimori)
-    w_user_cf: float = 0.6            # user-based CF (podobní uživatelé)
+    w_user_cf: float = 0.0            # user-based CF (podobní uživatelé). 0 od
+                                      # 2026-09-24: časový test (HODNOCENI §9d.8)
+                                      # -- signál senpai sám předpovídá mé pozdější
+                                      # známky slabě (Spearman +0,19), ale k modelu
+                                      # vkusu nic nepřidá: vkus +0,460, s váhou 0,3
+                                      # +0,448, 0,6 +0,427. User-CF dál dodává
+                                      # KANDIDÁTY do poolu a CF report
     w_quality: float = 0.3            # mírná preference vyššího komunitního skóre
     w_select: float = 0.5             # model výběru (selection.py): „sáhnu po tom
                                       # vůbec?" -- naučený z toho, co mezi

@@ -79,7 +79,10 @@ recommend:
                             # původní poměr odpovídá cca 0.33
   w_taste_fit: 1.0          # váha shody s atributy/náladami
   w_cf: 0.8                 # váha grafu podobnosti („doporučili to tvé oblíbené")
-  w_user_cf: 0.6            # váha user-based CF (podobní uživatelé) — vlastní složka
+  w_user_cf: 0.0            # váha user-based CF (podobní uživatelé). 0 = senpai jen
+                            # dodávají kandidáty a CF report, do řazení nemluví:
+                            # časový test (HODNOCENI §9d.8) ukázal, že k modelu
+                            # vkusu nic nepřidají (0,6 zhoršilo Spearman 0,46 → 0,43)
   w_quality: 0.3            # mírná preference vyššího MAL skóre
   w_select: 0.5             # model výběru „sáhnu po tom vůbec?" -- učí se z toho,
                             # co mezi populárními tituly v seznamu CHYBÍ

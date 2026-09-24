@@ -207,6 +207,16 @@ def test_v1_snapshot_loads_with_defaults():
         "watched_ids": [1], "ptw_ids": [], "recommendations": []})
     assert snap.schema == 1 and snap.list_state == []
     assert snap.date == "2026-07-28"
+    assert snap.shown == {}
+
+
+def test_snapshot_stores_what_the_report_showed(tmp_path):
+    """`recommendations` je top-N celého poolu (vč. PTW a pokračování), ne to,
+    co bylo v reportu vidět -- „ukázáno a do PTW nepřidáno" potřebuje sekce
+    (§9d.8)."""
+    shown = {"discovery": [10, 11], "known": [12], "ptw": [], "continuations": []}
+    save_snapshot(_snap([_entry(1)], [_rec(10)], shown=shown), tmp_path)
+    assert load_snapshots(tmp_path)[0].shown == shown
 
 
 # ── franšízy ─────────────────────────────────────────────────────────────

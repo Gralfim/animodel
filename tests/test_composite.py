@@ -120,9 +120,16 @@ def test_gather_meta_has_both_buckets():
 
 # ── kompozit: 4 složky, log1p na item hlasech ────────────────────────────
 
-def _run_recommend(cand_meta, communities):
+#: user-CF váha pro testy MECHANIKY složky -- default je od §9d.8 nula
+#: (k modelu vkusu nic nepřidala), ale výpočet složky se testovat má dál
+UCF_W = 0.6
+
+
+def _run_recommend(cand_meta, communities, w_user_cf=None):
     """Spustí recommend() s podstrčenými kandidáty a obohacením."""
     cfg = Config()
+    if w_user_cf is not None:
+        cfg.recommend.w_user_cf = w_user_cf
     rec = Recommender(_StubModel(), _Enr(), cfg)
     rec._gather_candidates = lambda titles, seen_ids: cand_meta
 
@@ -141,14 +148,14 @@ def test_composite_has_four_components_and_carries_both_signals():
         2: {"item_votes": 0.0, "user_votes": 9.0, "cf_seeds": [], "sources": {"user-CF"}},
         3: {"item_votes": 0.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"tag-search"}},
     }
-    recs = _run_recommend(cand, {1: 7.0, 2: 7.0, 3: 9.0})
+    recs = _run_recommend(cand, {1: 7.0, 2: 7.0, 3: 9.0}, w_user_cf=UCF_W)
     by_id = {r.mal_id: r for r in recs}
 
     # oba signály se nesou odděleně
     assert by_id[1].cf_signal == 60.0 and by_id[1].user_cf_signal == 0.0
     assert by_id[2].cf_signal == 0.0 and by_id[2].user_cf_signal == 9.0
 
-    # s defaultními vahami (0.8 / 0.6 / 0.3, taste=0 pro všechny):
+    # s vahami 0.8 / 0.6 / 0.3 (taste=0 pro všechny):
     # silný graf > user-CF > jen kvalita
     order = [r.mal_id for r in recs]
     assert order == [1, 2, 3]
@@ -167,7 +174,7 @@ def test_composite_has_four_components_and_carries_both_signals():
         sd = math.sqrt(sum((v - mean) ** 2 for v in vals) / n) or 1.0
         return (x - mean) / sd
     expected = (cfg.recommend.w_cf * z(logs, math.log1p(60.0))
-                + cfg.recommend.w_user_cf * z(users, 0.0)
+                + UCF_W * z(users, 0.0)
                 + cfg.recommend.w_quality * z(comms, 7.0))
     # taste_fit je pro všechny 0 -> z=0 (sd fallback 1.0), nepřispívá
     assert by_id[1].composite == pytest.approx(expected)
@@ -181,7 +188,7 @@ def test_user_cf_only_candidate_is_not_buried_by_graph_outlier():
         2: {"item_votes": 0.0, "user_votes": 9.0, "cf_seeds": [], "sources": {"user-CF"}},
         3: {"item_votes": 3.0, "user_votes": 0.0, "cf_seeds": [], "sources": {"MAL-rec"}},
     }
-    recs = _run_recommend(cand, {1: 7.0, 2: 7.0, 3: 7.0})
+    recs = _run_recommend(cand, {1: 7.0, 2: 7.0, 3: 7.0}, w_user_cf=UCF_W)
     by_id = {r.mal_id: r for r in recs}
     # user-CF kandidát poráží slabý graf (3 hlasy) -- ve sloučeném kbelíku
     # by měl (9 vs 3) taky navrch, ale outlier 60 by oba srazil k sobě;

@@ -488,7 +488,11 @@ def _record_history(ctx: RunContext, result, model, titles) -> None:
             ctx.entries, result.recs, model, cfg,
             top=cfg.recommend.history_top,
             export_date=_export_date(cfg.mal_export),
-            z_params=result.z_params, extra=extra)
+            z_params=result.z_params, extra=extra,
+            shown={name: [r.mal_id for r in cards] for name, cards in (
+                ("discovery", result.discovery), ("known", result.known),
+                ("ptw", result.ptw_ranked),
+                ("continuations", result.continuations[:15]))})
         older = [s for s in history.load_snapshots(cfg.history_dir)
                  if s.fingerprint != snap.fingerprint]
         path = history.save_snapshot(snap, cfg.history_dir)
